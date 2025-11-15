@@ -1,0 +1,85 @@
+# 项目配置文件
+# 用于管理GMM声音分类模型的各种参数
+
+paths:
+  # 数据路径配置
+  data_dir: './dev_data'
+  normal_data_path: './dev_data/normal'
+  anomaly_data_path: './dev_data/anomaly'
+  # 基础数据目录（用于设备类型加载）
+  base_data_dir: './dev_data'
+  model_save_path: './models/saved_models'
+  features_save_path: './features/saved_features'
+  results_save_path: './results'
+  logs_save_path: './logs'
+
+data:
+  # 音频数据处理配置
+  sample_rate: 22050        # 采样率
+  duration: 2.0            # 音频时长（秒）
+  mono: true               # 是否转换为单声道
+  normalize: true          # 是否归一化
+  train_val_split: 0.8     # 训练集和验证集的分割比例
+  batch_size: 32           # 批处理大小
+  
+  # 设备类型相关配置
+  use_device_type: true    # 是否使用设备类型加载数据
+  device_type: 'fan'       # 设备类型，默认使用fan，后续可以改为其他设备类型
+  # 支持的设备类型列表
+  supported_devices: ['fan', 'pump', 'slider', 'valve', 'gearbox', 'bearing', 'others']
+
+features:
+  # 音频特征提取配置
+  extract_features:        # 要提取的特征列表
+    - 'mfcc'               # 梅尔频率倒谱系数
+    - 'melspectrogram'     # 梅尔频谱图
+    - 'chroma'             # 色度特征
+    - 'spectral_contrast'  # 频谱对比度
+    - 'zcr'                # 过零率
+    - 'rms'                # 均方根能量
+  n_mfcc: 13               # MFCC系数数量
+  n_fft: 2048              # FFT窗口大小
+  hop_length: 512          # 帧移
+  n_mels: 128              # 梅尔滤波器数量
+  fmin: 0                  # 最低频率
+  fmax: 8000               # 最高频率
+  win_length: 2048         # 窗口长度
+
+model:
+  # GMM模型配置
+  type: 'gmm'              # 模型类型
+  n_components: 8          # GMM组件数量
+  covariance_type: 'full'  # 协方差类型：'full', 'tied', 'diag', 'spherical'
+  max_iter: 100            # 最大迭代次数
+  n_init: 3                # 初始化次数
+  tol: 0.001               # 收敛阈值
+  reg_covar: 1e-06         # 协方差矩阵的正则化系数
+
+training:
+  # 训练配置
+  cross_validation: true   # 是否进行交叉验证
+  cv_folds: 5              # 交叉验证的折数
+  optimize_components: true  # 是否优化组件数量
+  component_range:         # 组件数量搜索范围
+    - 2
+    - 4
+    - 8
+    - 16
+    - 32
+  random_state: 42         # 随机种子
+
+evaluation:
+  # 评估配置
+  threshold_method: 'f1'   # 阈值确定方法：'f1', 'precision_recall', 'roc'
+  n_thresholds: 100        # 阈值搜索数量
+  target_metric: 'f1'      # 目标优化指标
+  plot_metrics: true       # 是否绘制指标图表
+  save_plots: true         # 是否保存图表
+
+real_time:
+  # 实时分类配置
+  buffer_size: 2048        # 缓冲区大小
+  hop_length: 512          # 帧移
+  window_length: 2         # 窗口长度（秒）
+  detection_threshold: 0.5 # 检测阈值
+  consecutive_frames: 3    # 连续检测帧数要求
