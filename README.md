@@ -9,8 +9,16 @@ Project/
 ├── config/
 │   └── config.yaml          # 配置文件
 ├── dev_data/                # 训练和测试数据
-│   ├── normal/              # 正常声音数据
-│   └── anomaly/             # 异常声音数据
+│   ├── normal/              # 正常声音数据（传统结构）
+│   ├── anomaly/             # 异常声音数据（传统结构）
+│   └── fan/                 # 设备类型目录示例
+│       ├── train/           # 训练数据
+│       │   ├── normal/      # 正常样本
+│       │   └── anomaly/     # 异常样本
+│       ├── source_test/     # 源域测试数据
+│       │   ├── normal/      # 正常样本
+│       │   └── anomaly/     # 异常样本
+│       └── target_test/     # 目标域测试数据（可选）
 ├── features/                # 特征提取模块
 │   ├── __init__.py
 │   └── extract_features.py  # 音频特征提取功能
@@ -57,14 +65,41 @@ pip install sounddevice
 
 ### 1. 准备数据
 
-将正常和异常的音频文件分别放入`dev_data/normal/`和`dev_data/anomaly/`目录。系统支持常见的音频格式如WAV、MP3等。
+系统支持两种数据组织方式：
+
+#### 方式一：设备类型组织（推荐）
+
+为每个设备类型创建单独的文件夹，如`dev_data/fan/`，内部结构如下：
+- `train/normal/` - 训练用的正常声音数据
+- `train/anomaly/` - 训练用的异常声音数据
+- `source_test/normal/` - 测试用的正常声音数据
+- `source_test/anomaly/` - 测试用的异常声音数据
+
+目前系统已配置支持的设备类型有：`fan`, `pump`, `slider`, `valve`, `gearbox`, `bearing`, `others`
+
+#### 方式二：传统结构（向后兼容）
+
+将正常和异常的音频文件分别放入`dev_data/normal/`和`dev_data/anomaly/`目录。
 
 ### 2. 配置参数
 
 根据需要修改`config/config.yaml`文件中的参数：
 
 - **paths**：数据和模型保存路径
-- **data**：音频处理参数（采样率、时长等）
+  - `base_data_dir`：基础数据目录（用于设备类型加载）
+  - `normal_data_dir`：传统结构的正常数据目录
+  - `anomaly_data_dir`：传统结构的异常数据目录
+  - 其他路径参数...
+  
+- **data**：音频处理和数据加载参数
+  - `sample_rate`：采样率
+  - `duration`：音频时长（null表示加载整个文件）
+  - `normalize`：是否归一化音频
+  - `test_size`、`val_size`：数据集分割比例
+  - `use_device_type`：是否使用设备类型加载数据（true/false）
+  - `device_type`：设备类型，默认为'fan'
+  - `supported_devices`：支持的设备类型列表
+  
 - **features**：特征提取参数（MFCC数量、窗口大小等）
 - **model**：GMM模型参数（组件数量等）
 - **training**：训练参数
@@ -82,6 +117,9 @@ pip install sounddevice
 - `load_audio`：加载音频文件
 - `preprocess_audio`：预处理音频信号（归一化、降噪等）
 - `load_dataset`：加载并分割数据集（训练集、验证集、测试集）
+  - 支持两种数据加载方式：
+    - 设备类型方式：通过`device_type`和`base_data_dir`参数加载特定设备的数据
+    - 传统方式：通过`normal_dir`和`anomaly_dir`参数加载数据
 - `load_audio_batch`：批量加载音频文件
 
 ### 特征提取 (`features/extract_features.py`)
@@ -143,12 +181,19 @@ from utils.config_manager import load_config
 # 加载配置
 config = load_config()
 
-# 加载数据集
+# 加载数据集（使用设备类型方式）
 train_data, val_data, test_data = load_dataset(
-    normal_dir=config.get('paths.normal_data_dir'),
-    anomaly_dir=config.get('paths.anomaly_data_dir'),
-    sample_rate=config.get('data.sample_rate')
+    device_type=config.get('data.device_type', 'fan'),
+    base_data_dir=config.get('paths.base_data_dir', '../dev_data'),
+    sr=config.get('data.sample_rate')
 )
+
+# 或者使用传统方式（向后兼容）
+# train_data, val_data, test_data = load_dataset(
+#     normal_dir=config.get('paths.normal_data_dir'),
+#     anomaly_dir=config.get('paths.anomaly_data_dir'),
+#     sr=config.get('data.sample_rate')
+# )
 
 # 提取特征
 train_features = [extract_all_features(audio, config.get('data.sample_rate')) 
