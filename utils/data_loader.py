@@ -57,7 +57,7 @@ def preprocess_audio(y, sr, normalize=True, resample_rate=None):
     return y_processed, sr_new
 
 
-def load_dataset(normal_dir=None, anomaly_dir=None, sr=22050, test_size=0.2, val_size=0.2, random_state=42, device_type=None, base_data_dir=None):
+def load_dataset(normal_dir=None, anomaly_dir=None, sr=22050, test_size=0.2, val_size=0.2, random_state=42, device_type=None, base_data_dir=None, enable_domain_shift=False):
     """
     加载数据集并分割为训练集、验证集和测试集
     
@@ -70,11 +70,19 @@ def load_dataset(normal_dir=None, anomaly_dir=None, sr=22050, test_size=0.2, val
     random_state: 随机种子
     device_type: 设备类型（如'fan'），如果提供，将从base_data_dir/device_type加载数据
     base_data_dir: 基础数据目录，当提供device_type时使用
+    enable_domain_shift: 是否启用领域偏移模式
     
     返回:
+    在标准模式下：
     train_data: 训练集数据列表 [(audio_data, label), ...]
     val_data: 验证集数据列表 [(audio_data, label), ...]
     test_data: 测试集数据列表 [(audio_data, label), ...]
+    
+    在领域偏移模式下：
+    source_train_data: 源域训练集数据列表 [(audio_data, label), ...]
+    source_test_data: 源域测试集数据列表 [(audio_data, label), ...]
+    target_train_data: 目标域训练集数据列表 [(audio_data, label), ...]
+    target_test_data: 目标域测试集数据列表 [(audio_data, label), ...]
     """
     audio_files = []
     audio_labels = []
@@ -88,30 +96,114 @@ def load_dataset(normal_dir=None, anomaly_dir=None, sr=22050, test_size=0.2, val
         if not os.path.exists(device_dir):
             raise FileNotFoundError(f"设备目录不存在: {device_dir}")
         
-        # 加载训练、测试数据
-        # 训练数据通常在train目录
-        train_dir = os.path.join(device_dir, 'train')
-        if os.path.exists(train_dir):
-            for file_name in os.listdir(train_dir):
-                if file_name.endswith(('.wav', '.mp3', '.flac', '.ogg')):
-                    file_path = os.path.join(train_dir, file_name)
-                    audio_files.append(file_path)
-                    audio_labels.append(0)  # 训练集通常只包含正常样本
-        
-        # 测试数据在source_test和target_test目录
-        test_dirs = ['source_test', 'target_test']
-        for test_dir_name in test_dirs:
-            test_dir = os.path.join(device_dir, test_dir_name)
-            if os.path.exists(test_dir):
-                for file_name in os.listdir(test_dir):
+        # 领域偏移模式
+        if enable_domain_shift:
+            source_train_files = []
+            source_train_labels = []
+            source_test_files = []
+            source_test_labels = []
+            target_train_files = []
+            target_train_labels = []
+            target_test_files = []
+            target_test_labels = []
+            
+            # 源域训练数据
+            source_train_dir = os.path.join(device_dir, 'source_train')
+            if os.path.exists(source_train_dir):
+                for file_name in os.listdir(source_train_dir):
                     if file_name.endswith(('.wav', '.mp3', '.flac', '.ogg')):
-                        file_path = os.path.join(test_dir, file_name)
-                        audio_files.append(file_path)
-                        # 根据文件名判断是否为异常样本
+                        file_path = os.path.join(source_train_dir, file_name)
+                        source_train_files.append(file_path)
+                        source_train_labels.append(0)  # 训练集通常只包含正常样本
+            else:
+                # 如果没有source_train目录，使用train目录作为源域训练
+                train_dir = os.path.join(device_dir, 'train')
+                if os.path.exists(train_dir):
+                    for file_name in os.listdir(train_dir):
+                        if file_name.endswith(('.wav', '.mp3', '.flac', '.ogg')):
+                            file_path = os.path.join(train_dir, file_name)
+                            source_train_files.append(file_path)
+                            source_train_labels.append(0)
+            
+            # 源域测试数据
+            source_test_dir = os.path.join(device_dir, 'source_test')
+            if os.path.exists(source_test_dir):
+                for file_name in os.listdir(source_test_dir):
+                    if file_name.endswith(('.wav', '.mp3', '.flac', '.ogg')):
+                        file_path = os.path.join(source_test_dir, file_name)
+                        source_test_files.append(file_path)
                         if 'anomaly' in file_name.lower():
-                            audio_labels.append(1)
+                            source_test_labels.append(1)
                         else:
-                            audio_labels.append(0)
+                            source_test_labels.append(0)
+            
+            # 目标域训练数据
+            target_train_dir = os.path.join(device_dir, 'target_train')
+            if os.path.exists(target_train_dir):
+                for file_name in os.listdir(target_train_dir):
+                    if file_name.endswith(('.wav', '.mp3', '.flac', '.ogg')):
+                        file_path = os.path.join(target_train_dir, file_name)
+                        target_train_files.append(file_path)
+                        target_train_labels.append(0)  # 目标域训练集通常只包含正常样本
+            
+            # 目标域测试数据
+            target_test_dir = os.path.join(device_dir, 'target_test')
+            if os.path.exists(target_test_dir):
+                for file_name in os.listdir(target_test_dir):
+                    if file_name.endswith(('.wav', '.mp3', '.flac', '.ogg')):
+                        file_path = os.path.join(target_test_dir, file_name)
+                        target_test_files.append(file_path)
+                        if 'anomaly' in file_name.lower():
+                            target_test_labels.append(1)
+                        else:
+                            target_test_labels.append(0)
+            
+            print(f"领域偏移数据统计:")
+            print(f"- 源域训练样本: {len(source_train_files)}")
+            print(f"- 源域测试样本: {len(source_test_files)} (正常: {source_test_labels.count(0)}, 异常: {source_test_labels.count(1)})")
+            print(f"- 目标域训练样本: {len(target_train_files)}")
+            print(f"- 目标域测试样本: {len(target_test_files)} (正常: {target_test_labels.count(0)}, 异常: {target_test_labels.count(1)})")
+            
+            # 加载音频数据
+            print("正在加载音频数据...")
+            source_train_data = [(load_audio(file_path, sr=sr)[0], label) for file_path, label in zip(source_train_files, source_train_labels) if load_audio(file_path, sr=sr)[0] is not None]
+            source_test_data = [(load_audio(file_path, sr=sr)[0], label) for file_path, label in zip(source_test_files, source_test_labels) if load_audio(file_path, sr=sr)[0] is not None]
+            target_train_data = [(load_audio(file_path, sr=sr)[0], label) for file_path, label in zip(target_train_files, target_train_labels) if load_audio(file_path, sr=sr)[0] is not None]
+            target_test_data = [(load_audio(file_path, sr=sr)[0], label) for file_path, label in zip(target_test_files, target_test_labels) if load_audio(file_path, sr=sr)[0] is not None]
+            
+            print(f"音频数据加载完成:")
+            print(f"- 源域训练: {len(source_train_data)} 个有效样本")
+            print(f"- 源域测试: {len(source_test_data)} 个有效样本")
+            print(f"- 目标域训练: {len(target_train_data)} 个有效样本")
+            print(f"- 目标域测试: {len(target_test_data)} 个有效样本")
+            
+            return source_train_data, source_test_data, target_train_data, target_test_data
+        
+        # 标准模式
+        else:
+            # 训练数据通常在train目录
+            train_dir = os.path.join(device_dir, 'train')
+            if os.path.exists(train_dir):
+                for file_name in os.listdir(train_dir):
+                    if file_name.endswith(('.wav', '.mp3', '.flac', '.ogg')):
+                        file_path = os.path.join(train_dir, file_name)
+                        audio_files.append(file_path)
+                        audio_labels.append(0)  # 训练集通常只包含正常样本
+            
+            # 测试数据在source_test和target_test目录
+            test_dirs = ['source_test', 'target_test']
+            for test_dir_name in test_dirs:
+                test_dir = os.path.join(device_dir, test_dir_name)
+                if os.path.exists(test_dir):
+                    for file_name in os.listdir(test_dir):
+                        if file_name.endswith(('.wav', '.mp3', '.flac', '.ogg')):
+                            file_path = os.path.join(test_dir, file_name)
+                            audio_files.append(file_path)
+                            # 根据文件名判断是否为异常样本
+                            if 'anomaly' in file_name.lower():
+                                audio_labels.append(1)
+                            else:
+                                audio_labels.append(0)
     
     # 传统方式：分别指定正常和异常数据目录
     elif normal_dir and anomaly_dir:

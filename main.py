@@ -27,6 +27,7 @@ from features.extract_features import extract_all_features, extract_features_fro
 from models.gmm_model import GMMModel, train_gmm_model, find_optimal_components
 from models.threshold_detector import ThresholdDetector, find_optimal_threshold
 from utils.evaluator import ModelEvaluator, evaluate_model
+from utils.domain_adaptation import get_adaptation_method, calculate_mmd, calibrate_threshold, transfer_threshold_with_unlabeled
 
 
 def parse_arguments():
@@ -37,14 +38,16 @@ def parse_arguments():
     parser.add_argument('--config', type=str, default='config/config.yaml',
                         help='配置文件路径')
     parser.add_argument('--mode', type=str, default='train',
-                        choices=['train', 'evaluate', 'predict'],
-                        help='运行模式：train（训练）、evaluate（评估）、predict（预测）')
+                        choices=['train', 'evaluate', 'predict', 'domain_shift'],
+                        help='运行模式：train（训练）、evaluate（评估）、predict（预测）、domain_shift（领域偏移）')
     parser.add_argument('--audio_file', type=str,
                         help='在predict模式下需要预测的音频文件路径')
     parser.add_argument('--model_path', type=str,
                         help='预训练模型路径（用于evaluate或predict模式）')
     parser.add_argument('--threshold', type=float,
                         help='分类阈值（如果不提供，将使用验证集确定）')
+    parser.add_argument('--adaptation_method', type=str,
+                        help='领域适应方法（在domain_shift模式下使用）')
     return parser.parse_args()
 
 
@@ -55,6 +58,7 @@ def prepare_data(config):
     print("正在准备数据...")
     
     sample_rate = config.get('data.sample_rate')
+    enable_domain_shift = config.get('data.enable_domain_shift', False)
     
     # 检查是否使用设备类型加载数据
     if config.get('data.use_device_type', False):
@@ -63,15 +67,35 @@ def prepare_data(config):
         
         print(f"使用设备类型 '{device_type}' 加载数据")
         
-        # 加载数据集 - 使用设备类型方式
-        train_data, val_data, test_data = load_dataset(
-            device_type=device_type,
-            base_data_dir=base_data_dir,
-            sr=sample_rate,
-            test_size=config.get('data.test_size', 0.2),
-            val_size=config.get('data.val_size', 0.2),
-            random_state=config.get('data.random_state', 42)
-        )
+        # 领域偏移模式
+        if enable_domain_shift:
+            print("启用领域偏移模式")
+            source_train_data, source_test_data, target_train_data, target_test_data = load_dataset(
+                device_type=device_type,
+                base_data_dir=base_data_dir,
+                sr=sample_rate,
+                enable_domain_shift=True
+            )
+            
+            print(f"领域偏移数据加载完成:")
+            print(f"- 源域训练: {len(source_train_data)} 个样本")
+            print(f"- 源域测试: {len(source_test_data)} 个样本")
+            print(f"- 目标域训练: {len(target_train_data)} 个样本")
+            print(f"- 目标域测试: {len(target_test_data)} 个样本")
+            
+            return source_train_data, source_test_data, target_train_data, target_test_data
+        else:
+            # 标准模式
+            # 加载数据集 - 使用设备类型方式
+            train_data, val_data, test_data = load_dataset(
+                device_type=device_type,
+                base_data_dir=base_data_dir,
+                sr=sample_rate,
+                test_size=config.get('data.test_size', 0.2),
+                val_size=config.get('data.val_size', 0.2),
+                random_state=config.get('data.random_state', 42),
+                enable_domain_shift=False
+            )
     else:
         # 传统方式：分别指定正常和异常数据目录
         normal_dir = config.get('paths.normal_data_dir')
@@ -90,7 +114,8 @@ def prepare_data(config):
             sr=sample_rate,
             test_size=config.get('data.test_size', 0.2),
             val_size=config.get('data.val_size', 0.2),
-            random_state=config.get('data.random_state', 42)
+            random_state=config.get('data.random_state', 42),
+            enable_domain_shift=False
         )
     
     print(f"数据集加载完成: 训练集 {len(train_data)} 个样本, "
@@ -349,6 +374,211 @@ def train_mode(config, args):
     
     return model, threshold
 
+def domain_shift_mode(config, args):
+    """
+    领域偏移模式：在源域训练模型，在目标域测试
+    """
+    print("\n=== 领域偏移训练与评估 ===")
+    
+    # 准备数据 - 领域偏移模式
+    source_train_data, source_test_data, target_train_data, target_test_data = prepare_data(config)
+    
+    # 提取特征
+    print("\n提取源域特征...")
+    source_train_features, source_train_labels = extract_dataset_features(source_train_data, config)
+    source_test_features, source_test_labels = extract_dataset_features(source_test_data, config)
+    
+    print("\n提取目标域特征...")
+    target_train_features, target_train_labels = extract_dataset_features(target_train_data, config)
+    target_test_features, target_test_labels = extract_dataset_features(target_test_data, config)
+    
+    # 计算领域差异
+    print("\n计算领域差异 (MMD)...")
+    if len(source_train_features) > 0 and len(target_train_features) > 0:
+        mmd_before = calculate_mmd(source_train_features, target_train_features, kernel='rbf')
+        print(f"源域与目标域的MMD距离 (适应前): {mmd_before:.6f}")
+    else:
+        mmd_before = None
+        print("警告: 源域或目标域训练样本不足，无法计算MMD")
+    
+    # 应用领域适应
+    adaptation_method = args.adaptation_method or config.get('domain_shift.adaptation_method', 'mean_shift')
+    print(f"\n应用领域适应方法: {adaptation_method}")
+    
+    adapted_source_train_features = source_train_features.copy()
+    adapted_source_test_features = source_test_features.copy()
+    adapt_model = None
+    
+    try:
+        adapt_func = get_adaptation_method(adaptation_method)
+        
+        if adaptation_method in ['standardization', 'minmax']:
+            adapted_source_train_features, adapt_model = adapt_func(source_train_features, target_train_features)
+            # 使用相同的转换模型处理测试集
+            if adaptation_method == 'standardization':
+                adapted_source_test_features = adapt_model.transform(source_test_features)
+            else:  # minmax
+                adapted_source_test_features = adapt_model.transform(source_test_features)
+        elif adaptation_method == 'pca':
+            adapted_source_train_features, adapted_target_train_features, adapt_model = adapt_func(
+                source_train_features, target_train_features,
+                n_components=config.get('domain_shift.pca_components', None)
+            )
+            # 使用相同的PCA模型处理测试集
+            adapted_source_test_features = adapt_model.transform(source_test_features)
+            target_test_features = adapt_model.transform(target_test_features)
+        else:
+            # mean_shift, coral等方法
+            adapted_source_train_features = adapt_func(source_train_features, target_train_features)
+            adapted_source_test_features = adapt_func(source_test_features, target_train_features)
+        
+        # 重新计算MMD
+        if mmd_before is not None:
+            mmd_after = calculate_mmd(adapted_source_train_features, target_train_features, kernel='rbf')
+            print(f"源域与目标域的MMD距离 (适应后): {mmd_after:.6f}")
+            print(f"MMD改善率: {(mmd_before - mmd_after) / mmd_before * 100:.2f}%")
+            
+    except Exception as e:
+        print(f"应用领域适应时出错: {e}")
+        print("继续使用原始特征")
+    
+    # 在源域训练模型
+    print("\n在源域训练模型...")
+    model, optimal_components = train_model(
+        adapted_source_train_features, source_train_labels, config
+    )
+    
+    # 确定阈值（使用源域验证集或测试集）
+    print("\n确定最佳阈值...")
+    source_threshold = determine_threshold(
+        model, adapted_source_test_features, source_test_labels, config,
+        threshold=args.threshold
+    )
+    
+    # 阈值校准设置
+    enable_threshold_calibration = config.get('domain_shift.threshold_calibration', {}).get('enabled', True)
+    calibration_method = config.get('domain_shift.threshold_calibration', {}).get('method', 'f1_optimization')
+    
+    # 应用阈值校准
+    calibrated_threshold = source_threshold
+    calibration_score = 0.0
+    
+    if enable_threshold_calibration:
+        print(f"\n在目标域上校准阈值 (方法: {calibration_method})...")
+        try:
+            # 检查是否有目标域标签可用于校准
+            if len(target_test_labels) > 0:
+                # 使用有标签的目标域数据进行校准
+                calibrated_threshold, calibration_score = calibrate_threshold(
+                    model, target_test_features, target_test_labels, source_threshold, calibration_method
+                )
+            else:
+                # 使用未标记的目标域数据进行阈值迁移
+                print("目标域没有标签，使用未标记数据进行阈值迁移...")
+                calibrated_threshold = transfer_threshold_with_unlabeled(
+                    model, target_train_features, source_threshold, method='distribution_matching'
+                )
+        except Exception as e:
+            print(f"阈值校准失败: {e}")
+            print("继续使用源域阈值...")
+            calibrated_threshold = source_threshold
+    else:
+        print("未启用阈值校准，使用源域阈值")
+    
+    # 在源域评估
+    print("\n在源域评估模型性能...")
+    source_metrics = evaluate_final_model(
+        model, adapted_source_test_features, source_test_labels, source_threshold, config
+    )
+    
+    # 在目标域评估
+    print("\n在目标域评估模型性能...")
+    target_metrics = evaluate_final_model(
+        model, target_test_features, target_test_labels, calibrated_threshold, config
+    )
+    
+    # 保存结果
+    print("\n保存结果...")
+    model_dir = config.get('paths.model_dir')
+    os.makedirs(model_dir, exist_ok=True)
+    
+    # 保存模型
+    model_path = os.path.join(model_dir, f'gmm_domain_shift_model_{adaptation_method}.pkl')
+    model.save(model_path)
+    print(f"领域偏移模型已保存至: {model_path}")
+    
+    # 保存领域适应模型（如果有）
+    if adapt_model is not None:
+        import joblib
+        adapt_model_path = os.path.join(model_dir, f'adapt_model_{adaptation_method}.pkl')
+        joblib.dump(adapt_model, adapt_model_path)
+        print(f"领域适应模型已保存至: {adapt_model_path}")
+    
+    # 保存配置和结果
+    import json
+    results = {
+        'source_threshold': source_threshold,
+        'calibrated_threshold': calibrated_threshold,
+        'optimal_components': optimal_components,
+        'adaptation_method': adaptation_method,
+        'mmd_before': mmd_before,
+        'mmd_after': mmd_after if 'mmd_after' in locals() else None,
+        'source_domain_metrics': source_metrics,
+        'target_domain_metrics': target_metrics,
+        'threshold_calibration_enabled': enable_threshold_calibration,
+        'threshold_calibration_method': calibration_method,
+        'calibration_score': calibration_score,
+        'config': dict(config.config)
+    }
+    
+    results_path = os.path.join(model_dir, f'domain_shift_results_{adaptation_method}.json')
+    with open(results_path, 'w', encoding='utf-8') as f:
+        json.dump(results, f, indent=2, ensure_ascii=False)
+    
+    print(f"领域偏移训练结果已保存至: {results_path}")
+    
+    # 打印对比结果
+    print("\n=== 领域偏移结果对比 ===")
+    print("源域性能:")
+    print(f"  准确率: {source_metrics['accuracy']:.4f}")
+    print(f"  F1分数: {source_metrics['f1']:.4f}")
+    
+    print("\n目标域性能:")
+    print(f"  准确率: {target_metrics['accuracy']:.4f}")
+    print(f"  F1分数: {target_metrics['f1']:.4f}")
+    print(f"\n阈值:")
+    print(f"  源域: {source_threshold:.4f}")
+    print(f"  校准后: {calibrated_threshold:.4f}")
+    
+    # 计算阈值校准带来的改善
+    if enable_threshold_calibration:
+        try:
+            # 获取模型在目标域上使用源域阈值的性能
+            detector = ThresholdDetector(model)
+            _, source_threshold_metrics = evaluate_model(
+                model, target_test_features, target_test_labels,
+                threshold=source_threshold,
+                target_names=['normal', 'anomaly']
+            )
+            
+            f1_before = source_threshold_metrics['f1']
+            f1_after = target_metrics['f1']
+            
+            if f1_before > 0:
+                f1_improvement = (f1_after - f1_before) / f1_before * 100
+                print(f"\n阈值校准带来的F1改善: {f1_improvement:.2f}%")
+        except Exception as e:
+            print(f"\n计算阈值校准改善时出错: {e}")
+    
+    if target_metrics['f1'] > source_metrics['f1']:
+        print("\n✅ 领域适应成功: 目标域性能优于源域")
+    elif target_metrics['f1'] < source_metrics['f1']:
+        print("\n⚠️ 领域适应效果不佳: 目标域性能低于源域")
+    else:
+        print("\n➡️ 领域适应中性: 目标域性能与源域相当")
+    
+    return model, calibrated_threshold, source_metrics, target_metrics
+
 
 def evaluate_mode(config, args):
     """
@@ -432,6 +662,10 @@ def main():
         evaluate_mode(config, args)
     elif args.mode == 'predict':
         predict_mode(config, args)
+    elif args.mode == 'domain_shift':
+        # 设置领域偏移模式标志
+        config.config['data']['enable_domain_shift'] = True
+        domain_shift_mode(config, args)
     
     print("\n程序执行完成")
 

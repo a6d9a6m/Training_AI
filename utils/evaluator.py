@@ -72,11 +72,29 @@ class ModelEvaluator:
             y_pred = self.model.predict(X)
             # 尝试获取分数
             if hasattr(self.model, 'predict_proba'):
-                y_score = self.model.predict_proba(X)[:, anomaly_class]
+                try:
+                    # 尝试获取异常类的概率
+                    proba = self.model.predict_proba(X)
+                    # 检查是否有足够的类别
+                    if proba.shape[1] > anomaly_class:
+                        y_score = proba[:, anomaly_class]
+                    else:
+                        # 单类别情况，使用负的正常类概率作为异常分数
+                        print(f"警告: 模型只有{proba.shape[1]}个类别，使用单类别模式")
+                        y_score = -proba[:, normal_class]
+                except Exception as e:
+                    print(f"获取预测概率时出错: {e}")
+                    y_score = None
             elif hasattr(self.model, 'get_class_likelihood'):
-                normal_likelihoods = self.model.get_class_likelihood(X, normal_class)
-                anomaly_likelihoods = self.model.get_class_likelihood(X, anomaly_class)
-                y_score = anomaly_likelihoods - normal_likelihoods
+                try:
+                    normal_likelihoods = self.model.get_class_likelihood(X, normal_class)
+                    # 尝试获取异常类的似然概率
+                    anomaly_likelihoods = self.model.get_class_likelihood(X, anomaly_class)
+                    y_score = anomaly_likelihoods - normal_likelihoods
+                except ValueError:
+                    # 单类别情况，使用负的正常类似然作为异常分数
+                    print(f"警告: 模型中不存在异常类 {anomaly_class}，使用单类别模式")
+                    y_score = -normal_likelihoods
             else:
                 y_score = None
         else:

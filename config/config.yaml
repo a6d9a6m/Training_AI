@@ -86,3 +86,26 @@ real_time:
   window_length: 2         # 窗口长度（秒）
   detection_threshold: 0.5 # 检测阈值
   consecutive_frames: 3    # 连续检测帧数要求
+
+domain_shift:
+  # 领域偏移配置
+  enable_domain_shift: true  # 是否启用领域偏移
+  adaptation_method: 'mean_shift'  # 默认的领域适应方法
+  # 可用的领域适应方法列表
+  available_methods: ['mean_shift', 'standardization', 'minmax', 'pca', 'coral']
+  
+  # PCA适应相关参数
+  pca_components: null  # PCA主成分数量，null表示自动选择
+  pca_whiten: true      # 是否对PCA输出进行白化
+  
+  # MMD评估参数
+  mmd_kernel: 'rbf'     # MMD核函数类型
+  mmd_sigma: 1.0        # RBF核的sigma参数
+  
+  # 源域和目标域配置
+  source_domain: 'source'  # 源域文件夹名称
+  target_domain: 'target'  # 目标域文件夹名称
+  
+  # 评估配置
+  evaluate_both_domains: true  # 是否同时评估源域和目标域
+  plot_domain_comparison: true  # 是否绘制领域对比图

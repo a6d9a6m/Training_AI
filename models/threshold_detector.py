@@ -55,11 +55,16 @@ class ThresholdDetector:
         # 获取正常类的似然概率
         normal_likelihoods = self.model.get_class_likelihood(X_val, normal_class)
         
-        # 获取异常类的似然概率
-        anomaly_likelihoods = self.model.get_class_likelihood(X_val, anomaly_class)
-        
-        # 计算异常分数 (异常类似然 - 正常类似然)
-        anomaly_scores = anomaly_likelihoods - normal_likelihoods
+        # 检查模型是否包含异常类
+        try:
+            # 尝试获取异常类的似然概率
+            anomaly_likelihoods = self.model.get_class_likelihood(X_val, anomaly_class)
+            # 计算异常分数 (异常类似然 - 正常类似然)
+            anomaly_scores = anomaly_likelihoods - normal_likelihoods
+        except ValueError:
+            # 如果模型只有正常类，使用负的正常类似然作为异常分数
+            print(f"警告: 模型中不存在异常类 {anomaly_class}，使用单类别模式")
+            anomaly_scores = -normal_likelihoods
         
         # 生成候选阈值
         min_score = np.min(anomaly_scores)
