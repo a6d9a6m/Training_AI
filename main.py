@@ -104,16 +104,18 @@ def extract_features_wrapper(audio_data, config):
     特征提取包装函数
     """
     audio, label = audio_data
-    features = extract_all_features(
-        audio, 
-        sample_rate=config.get('data.sample_rate'),
-        n_mfcc=config.get('features.n_mfcc', 13),
-        n_fft=config.get('features.n_fft', 2048),
-        hop_length=config.get('features.hop_length', 512),
-        win_length=config.get('features.win_length', None),
-        n_mels=config.get('features.n_mels', 128)
-    )
-    return features, label
+    # 创建特征配置字典
+    feature_config = {
+        'mfcc': {'n_mfcc': config.get('features.n_mfcc', 13)},
+        'melspectrogram': {'n_mels': config.get('features.n_mels', 128)},
+        'chroma': {},
+        'spectral_contrast': {},
+        'zero_crossing_rate': {},
+        'rms_energy': {}
+    }
+    # extract_all_features返回(combined_features, feature_dict)，我们只需要第一个
+    combined_features, _ = extract_all_features(audio, config.get('data.sample_rate'), feature_config)
+    return combined_features, label
 
 
 def extract_dataset_features(dataset, config):
@@ -143,7 +145,11 @@ def extract_dataset_features(dataset, config):
     print(f"特征提取完成，耗时: {end_time - start_time:.2f} 秒")
     print(f"成功提取: {len(features_list)} 个样本的特征")
     
-    return features_list, labels_list
+    # 转换为NumPy数组
+    features_array = np.array(features_list)
+    labels_array = np.array(labels_list)
+    
+    return features_array, labels_array
 
 
 def train_model(train_features, train_labels, config, val_features=None, val_labels=None):
@@ -159,11 +165,11 @@ def train_model(train_features, train_labels, config, val_features=None, val_lab
         max_components = config.get('model.max_components', 10)
         cv_folds = config.get('model.cv_folds', 5)
         
-        optimal_components = find_optimal_components(
+        optimal_components, best_score, _ = find_optimal_components(
             train_features, train_labels,
             min_components=min_components,
             max_components=max_components,
-            cv_folds=cv_folds
+            cv=cv_folds
         )
         print(f"最佳组件数量: {optimal_components}")
     else:
@@ -173,9 +179,7 @@ def train_model(train_features, train_labels, config, val_features=None, val_lab
     model = train_gmm_model(
         train_features, train_labels,
         n_components=optimal_components,
-        covariance_type=config.get('model.covariance_type', 'diag'),
-        reg_covar=config.get('model.reg_covar', 1e-6),
-        max_iter=config.get('model.max_iter', 100)
+        covariance_type=config.get('model.covariance_type', 'diag')
     )
     
     print("模型训练完成")
@@ -199,8 +203,7 @@ def determine_threshold(model, val_features, val_labels, config, threshold=None)
     
     optimal_threshold = find_optimal_threshold(
         model, val_features, val_labels,
-        method=method,
-        plot=config.get('evaluation.plot_threshold_curves', True)
+        method=method
     )
     
     print(f"最佳阈值 ({method}): {optimal_threshold}")
@@ -213,12 +216,13 @@ def evaluate_final_model(model, test_features, test_labels, threshold, config):
     """
     print("\n正在评估模型性能...")
     
-    # 使用评估器
-    evaluator = ModelEvaluator(model, threshold)
-    metrics = evaluator.evaluate(
-        test_features, test_labels,
-        plot=config.get('evaluation.plot_results', True),
-        plot_save_dir=config.get('paths.plots_dir', None)
+    # 使用评估函数
+    output_dir = config.get('paths.plots_dir', None) if config.get('evaluation.plot_results', True) else None
+    evaluator, metrics = evaluate_model(
+        model, test_features, test_labels, 
+        threshold=threshold,
+        target_names=['normal', 'anomaly'],
+        output_dir=output_dir
     )
     
     # 打印评估指标
@@ -226,9 +230,8 @@ def evaluate_final_model(model, test_features, test_labels, threshold, config):
     print(f"准确率 (Accuracy): {metrics['accuracy']:.4f}")
     print(f"精确率 (Precision): {metrics['precision']:.4f}")
     print(f"召回率 (Recall): {metrics['recall']:.4f}")
-    print(f"F1分数 (F1 Score): {metrics['f1_score']:.4f}")
-    print(f"ROC AUC: {metrics['roc_auc']:.4f}")
-    print(f"精确率-召回率 AUC: {metrics['pr_auc']:.4f}")
+    print(f"F1分数 (F1 Score): {metrics['f1']:.4f}")
+    print(f"ROC AUC: {metrics.get('roc_auc', 'N/A')}")
     print(f"混淆矩阵:")
     print(metrics['confusion_matrix'])
     
@@ -275,7 +278,7 @@ def predict_audio_file(audio_path, model, config, threshold):
     # 提取特征
     features = extract_all_features(
         audio, 
-        sample_rate=sr,
+        sr=sr,
         n_mfcc=config.get('features.n_mfcc', 13),
         n_fft=config.get('features.n_fft', 2048),
         hop_length=config.get('features.hop_length', 512),

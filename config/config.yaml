@@ -12,6 +12,9 @@ paths:
   features_save_path: './features/saved_features'
   results_save_path: './results'
   logs_save_path: './logs'
+  # 新增配置项以匹配代码需求
+  model_dir: './models/saved_models'
+  plots_dir: './results/plots'
 
 data:
   # 音频数据处理配置
