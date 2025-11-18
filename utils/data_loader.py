@@ -90,11 +90,18 @@ def load_dataset(normal_dir=None, anomaly_dir=None, sr=22050, test_size=0.2, val
     # 如果指定了设备类型和基础数据目录，使用这种方式加载
     if device_type and base_data_dir:
         print(f"正在加载设备类型 '{device_type}' 的数据...")
-        device_dir = os.path.join(base_data_dir, device_type)
-        
-        # 检查设备目录是否存在
+        # 使用os.path.normpath规范化路径，解决Windows路径问题
+        device_dir = os.path.normpath(os.path.join(base_data_dir, device_type))
+        print(f"尝试访问设备目录: {device_dir}")
         if not os.path.exists(device_dir):
-            raise FileNotFoundError(f"设备目录不存在: {device_dir}")
+            # 尝试使用绝对路径
+            abs_device_dir = os.path.normpath(os.path.join(os.getcwd(), base_data_dir, device_type))
+            print(f"相对路径不存在，尝试绝对路径: {abs_device_dir}")
+            if not os.path.exists(abs_device_dir):
+                raise FileNotFoundError(f"设备目录不存在: {device_dir}")
+            else:
+                device_dir = abs_device_dir
+                print(f"使用绝对路径: {device_dir}")
         
         # 领域偏移模式
         if enable_domain_shift:
@@ -107,23 +114,16 @@ def load_dataset(normal_dir=None, anomaly_dir=None, sr=22050, test_size=0.2, val
             target_test_files = []
             target_test_labels = []
             
-            # 源域训练数据
-            source_train_dir = os.path.join(device_dir, 'source_train')
-            if os.path.exists(source_train_dir):
-                for file_name in os.listdir(source_train_dir):
+            # 源域训练数据 - 直接使用train目录作为源域训练
+            train_dir = os.path.join(device_dir, 'train')
+            if os.path.exists(train_dir):
+                for file_name in os.listdir(train_dir):
                     if file_name.endswith(('.wav', '.mp3', '.flac', '.ogg')):
-                        file_path = os.path.join(source_train_dir, file_name)
+                        file_path = os.path.join(train_dir, file_name)
                         source_train_files.append(file_path)
                         source_train_labels.append(0)  # 训练集通常只包含正常样本
             else:
-                # 如果没有source_train目录，使用train目录作为源域训练
-                train_dir = os.path.join(device_dir, 'train')
-                if os.path.exists(train_dir):
-                    for file_name in os.listdir(train_dir):
-                        if file_name.endswith(('.wav', '.mp3', '.flac', '.ogg')):
-                            file_path = os.path.join(train_dir, file_name)
-                            source_train_files.append(file_path)
-                            source_train_labels.append(0)
+                print(f"警告: 训练目录不存在: {train_dir}")
             
             # 源域测试数据
             source_test_dir = os.path.join(device_dir, 'source_test')
@@ -137,14 +137,18 @@ def load_dataset(normal_dir=None, anomaly_dir=None, sr=22050, test_size=0.2, val
                         else:
                             source_test_labels.append(0)
             
-            # 目标域训练数据
-            target_train_dir = os.path.join(device_dir, 'target_train')
+            # 目标域训练数据 - 暂时使用target_test目录作为目标域训练
+            target_train_dir = os.path.join(device_dir, 'target_test')
             if os.path.exists(target_train_dir):
                 for file_name in os.listdir(target_train_dir):
                     if file_name.endswith(('.wav', '.mp3', '.flac', '.ogg')):
                         file_path = os.path.join(target_train_dir, file_name)
                         target_train_files.append(file_path)
-                        target_train_labels.append(0)  # 目标域训练集通常只包含正常样本
+                        # 尝试从文件名判断是否为异常样本
+                        if 'anomaly' in file_name.lower():
+                            target_train_labels.append(1)
+                        else:
+                            target_train_labels.append(0)  # 默认标记为正常样本
             
             # 目标域测试数据
             target_test_dir = os.path.join(device_dir, 'target_test')

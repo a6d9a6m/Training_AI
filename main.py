@@ -19,6 +19,7 @@ import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 import time
+import hashlib
 
 # 导入项目模块
 from utils.config_manager import load_config, create_default_config
@@ -27,7 +28,7 @@ from features.extract_features import extract_all_features, extract_features_fro
 from models.gmm_model import GMMModel, train_gmm_model, find_optimal_components
 from models.threshold_detector import ThresholdDetector, find_optimal_threshold
 from utils.evaluator import ModelEvaluator, evaluate_model
-from utils.domain_adaptation import get_adaptation_method, calculate_mmd, calibrate_threshold, transfer_threshold_with_unlabeled
+from utils.domain_adaptation import get_adaptation_method, calculate_mmd, calibrate_threshold, transfer_threshold_with_unlabeled, select_domain_invariant_features, ensemble_feature_selection, ensemble_adaptation, get_best_adaptation_method
 
 
 def parse_arguments():
@@ -143,10 +144,45 @@ def extract_features_wrapper(audio_data, config):
     return combined_features, label
 
 
-def extract_dataset_features(dataset, config):
+def extract_dataset_features(dataset, config, dataset_name="dataset"):
     """
-    提取数据集的特征
+    从数据集中提取特征，支持特征缓存机制
+    
+    参数:
+    dataset: 数据集，包含音频数据和标签
+    config: 配置字典
+    dataset_name: 数据集名称，用于生成缓存文件名
+    
+    返回:
+    features_array: 特征数组
+    labels_array: 标签数组
     """
+    # 检查是否使用特征缓存
+    use_cache = config.get('features.use_cache', True)
+    features_dir = config.get('paths.features_save_path', './features/saved_features')
+    
+    # 创建缓存目录（如果不存在）
+    if use_cache:
+        os.makedirs(features_dir, exist_ok=True)
+        
+        # 生成缓存文件名（包含配置的哈希值，确保配置变化时重新生成特征）
+        config_str = str(config.get('features', {}))
+        config_hash = hashlib.md5(config_str.encode()).hexdigest()[:8]
+        cache_file = os.path.join(features_dir, f"features_{dataset_name}_{len(dataset)}samples_{config_hash}.npz")
+        
+        # 尝试加载缓存特征
+        if os.path.exists(cache_file):
+            print(f"正在从缓存加载特征: {cache_file}")
+            try:
+                data = np.load(cache_file)
+                features_array = data['features']
+                labels_array = data['labels']
+                print(f"特征加载成功，共 {len(features_array)} 个样本")
+                return features_array, labels_array
+            except Exception as e:
+                print(f"加载缓存特征失败: {e}，将重新提取特征")
+    
+    # 如果没有缓存或加载失败，提取特征
     print(f"正在提取特征，共 {len(dataset)} 个样本...")
     
     features_list = []
@@ -173,6 +209,14 @@ def extract_dataset_features(dataset, config):
     # 转换为NumPy数组
     features_array = np.array(features_list)
     labels_array = np.array(labels_list)
+    
+    # 保存特征到缓存
+    if use_cache and len(features_list) > 0:
+        try:
+            np.savez_compressed(cache_file, features=features_array, labels=labels_array)
+            print(f"特征已保存到缓存: {cache_file}")
+        except Exception as e:
+            print(f"保存特征缓存失败: {e}")
     
     return features_array, labels_array
 
@@ -350,9 +394,9 @@ def train_mode(config, args):
     train_data, val_data, test_data = prepare_data(config)
     
     # 提取特征
-    train_features, train_labels = extract_dataset_features(train_data, config)
-    val_features, val_labels = extract_dataset_features(val_data, config)
-    test_features, test_labels = extract_dataset_features(test_data, config)
+    train_features, train_labels = extract_dataset_features(train_data, config, dataset_name="train")
+    val_features, val_labels = extract_dataset_features(val_data, config, dataset_name="val")
+    test_features, test_labels = extract_dataset_features(test_data, config, dataset_name="test")
     
     # 训练模型
     model, optimal_components = train_model(
@@ -385,12 +429,12 @@ def domain_shift_mode(config, args):
     
     # 提取特征
     print("\n提取源域特征...")
-    source_train_features, source_train_labels = extract_dataset_features(source_train_data, config)
-    source_test_features, source_test_labels = extract_dataset_features(source_test_data, config)
+    source_train_features, source_train_labels = extract_dataset_features(source_train_data, config, dataset_name="source_train")
+    source_test_features, source_test_labels = extract_dataset_features(source_test_data, config, dataset_name="source_test")
     
     print("\n提取目标域特征...")
-    target_train_features, target_train_labels = extract_dataset_features(target_train_data, config)
-    target_test_features, target_test_labels = extract_dataset_features(target_test_data, config)
+    target_train_features, target_train_labels = extract_dataset_features(target_train_data, config, dataset_name="target_train")
+    target_test_features, target_test_labels = extract_dataset_features(target_test_data, config, dataset_name="target_test")
     
     # 计算领域差异
     print("\n计算领域差异 (MMD)...")
@@ -401,40 +445,190 @@ def domain_shift_mode(config, args):
         mmd_before = None
         print("警告: 源域或目标域训练样本不足，无法计算MMD")
     
+    # 应用特征选择
+    enable_feature_selection = config.get('domain_shift.feature_selection', {}).get('enabled', False)
+    feature_selection_method = config.get('domain_shift.feature_selection', {}).get('method', 'mmd_based')
+    feature_selection_ratio = config.get('domain_shift.feature_selection', {}).get('ratio', 0.8)
+    use_ensemble_selection = config.get('domain_shift.feature_selection', {}).get('ensemble', False)
+    
+    selected_source_train_features = source_train_features
+    selected_source_test_features = source_test_features
+    selected_target_train_features = target_train_features
+    selected_target_test_features = target_test_features
+    feature_selector = None
+    selected_feature_indices = None
+    
+    if enable_feature_selection:
+        print(f"\n应用特征选择 (方法: {feature_selection_method}, 比例: {feature_selection_ratio})...")
+        try:
+            if use_ensemble_selection:
+                # 使用集成特征选择
+                methods = config.get('domain_shift.feature_selection', {}).get('ensemble_methods', 
+                                                                          ['f_statistic', 'mutual_info', 'mmd_based'])
+                selected_source_train_features, selected_target_train_features, selected_feature_indices, _ = ensemble_feature_selection(
+                    source_train_features, source_train_labels, target_train_features,
+                    methods=methods, k=feature_selection_ratio
+                )
+                # 对测试集应用相同的特征选择
+                selected_source_test_features = source_test_features[:, selected_feature_indices]
+                selected_target_test_features = target_test_features[:, selected_feature_indices]
+            else:
+                # 使用单一特征选择方法
+                selected_source_train_features, selected_target_train_features, feature_selector, selected_feature_indices = select_domain_invariant_features(
+                    source_train_features, source_train_labels, target_train_features,
+                    method=feature_selection_method, k=feature_selection_ratio
+                )
+                # 对测试集应用相同的特征选择
+                if feature_selector:
+                    selected_source_test_features = feature_selector.transform(source_test_features)
+                    selected_target_test_features = feature_selector.transform(target_test_features)
+                else:
+                    selected_source_test_features = source_test_features[:, selected_feature_indices]
+                    selected_target_test_features = target_test_features[:, selected_feature_indices]
+            
+            print(f"特征选择后: 源域特征维度 {selected_source_train_features.shape[1]}, 目标域特征维度 {selected_target_train_features.shape[1]}")
+        except Exception as e:
+            print(f"特征选择失败: {e}")
+            print("继续使用原始特征")
+            selected_source_train_features = source_train_features
+            selected_source_test_features = source_test_features
+            selected_target_train_features = target_train_features
+            selected_target_test_features = target_test_features
+    else:
+        print("未启用特征选择，使用原始特征")
+    
     # 应用领域适应
     adaptation_method = args.adaptation_method or config.get('domain_shift.adaptation_method', 'mean_shift')
     print(f"\n应用领域适应方法: {adaptation_method}")
     
-    adapted_source_train_features = source_train_features.copy()
-    adapted_source_test_features = source_test_features.copy()
+    adapted_source_train_features = selected_source_train_features.copy()
+    adapted_source_test_features = selected_source_test_features.copy()
     adapt_model = None
+    domain_shift_config = config.get('domain_shift', {})
     
     try:
-        adapt_func = get_adaptation_method(adaptation_method)
-        
-        if adaptation_method in ['standardization', 'minmax']:
-            adapted_source_train_features, adapt_model = adapt_func(source_train_features, target_train_features)
-            # 使用相同的转换模型处理测试集
-            if adaptation_method == 'standardization':
-                adapted_source_test_features = adapt_model.transform(source_test_features)
-            else:  # minmax
-                adapted_source_test_features = adapt_model.transform(source_test_features)
-        elif adaptation_method == 'pca':
-            adapted_source_train_features, adapted_target_train_features, adapt_model = adapt_func(
-                source_train_features, target_train_features,
-                n_components=config.get('domain_shift.pca_components', None)
+        # 处理集成适应或自动方法选择
+        if adaptation_method == 'ensemble':
+            # 集成多种适应方法
+            ensemble_config = domain_shift_config.get('ensemble_config', {})
+            methods = ensemble_config.get('methods', ['standardization', 'coral_adaptation', 'mean_shift'])
+            strategy = ensemble_config.get('strategy', 'weighted_average')
+            weights = ensemble_config.get('weights', None)
+            adapt_config = ensemble_config.get('adaptation_config', {})
+            
+            print(f"使用集成策略: {strategy}")
+            print(f"集成方法: {', '.join(methods)}")
+            
+            adapted_source_train_features, method_results = ensemble_adaptation(
+                selected_source_train_features, selected_target_train_features,
+                methods=methods, weights=weights, strategy=strategy, adaptation_config=adapt_config
             )
-            # 使用相同的PCA模型处理测试集
-            adapted_source_test_features = adapt_model.transform(source_test_features)
-            target_test_features = adapt_model.transform(target_test_features)
+            
+            # 转换测试集
+            if len(adapted_source_test_features) > 0:
+                test_results = []
+                for method_name in methods:
+                    if method_name in method_results:
+                        if 'model' in method_results[method_name]:
+                            # 对于有model的方法（如标准化）
+                            test_result = method_results[method_name]['model'].transform(adapted_source_test_features)
+                        elif method_name in ['coral_adaptation', 'joint_distribution_adaptation']:
+                            # 对于需要参考目标域的方法
+                            adapt_func = get_adaptation_method(method_name)
+                            test_result = adapt_func(adapted_source_test_features, selected_target_train_features)
+                        else:
+                            # 其他方法
+                            adapt_func = get_adaptation_method(method_name)
+                            test_result = adapt_func(adapted_source_test_features, adapted_source_test_features)
+                        test_results.append(test_result)
+                
+                # 对测试集应用相同的集成策略
+                if strategy == 'weighted_average':
+                    if weights is None:
+                        weights = np.ones(len(methods)) / len(methods)
+                    else:
+                        weights = np.array(weights) / np.sum(weights)
+                    
+                    adapted_source_test_features = np.zeros_like(adapted_source_test_features)
+                    for i, result in enumerate(test_results):
+                        adapted_source_test_features += result * weights[i]
+                elif strategy == 'dynamic_weighting':
+                    # 对于动态权重，使用与训练相同的权重策略
+                    # 这里简化处理，使用等权重
+                    adapted_source_test_features = np.mean(test_results, axis=0)
+                else:
+                    # 其他策略简化处理
+                    adapted_source_test_features = np.mean(test_results, axis=0)
+            
+            adapted_target_train_features = selected_target_train_features  # 集成适应后目标域特征保持不变
+            
+        elif adaptation_method == 'auto':
+            # 自动选择最佳适应方法
+            print("自动选择最佳适应方法...")
+            methods_to_try = domain_shift_config.get('methods_to_try', 
+                ['standardization', 'minmax', 'coral_adaptation', 'mean_shift', 'joint_distribution_adaptation', 'pca'])
+            
+            best_method, best_score = get_best_adaptation_method(
+                selected_source_train_features, source_train_labels,
+                selected_target_train_features, 
+                target_labels=target_train_labels if len(target_train_labels) > 0 else None,
+                methods=methods_to_try
+            )
+            
+            print(f"最佳方法: {best_method}, 得分: {best_score:.4f}")
+            
+            # 应用最佳方法
+            adaptation_method = best_method
+            adapt_func = get_adaptation_method(adaptation_method)
+            
+            # 根据方法类型应用不同的领域适应
+            if adaptation_method in ['standardization', 'minmax', 'robust_scaling']:
+                adapted_source_train_features, adapt_model = adapt_func(selected_source_train_features, selected_target_train_features)
+                if len(adapted_source_test_features) > 0:
+                    adapted_source_test_features = adapt_model.transform(adapted_source_test_features)
+            elif adaptation_method == 'pca':
+                pca_components = domain_shift_config.get('pca_components', None)
+                adapted_source_train_features, adapted_target_train_features, adapt_model = adapt_func(
+                    selected_source_train_features, selected_target_train_features, n_components=pca_components
+                )
+                if len(adapted_source_test_features) > 0:
+                    adapted_source_test_features = adapt_model.transform(adapted_source_test_features)
+                    selected_target_test_features = adapt_model.transform(selected_target_test_features)
+            else:
+                adapted_source_train_features = adapt_func(selected_source_train_features, selected_target_train_features)
+                if adaptation_method in ['coral', 'joint_distribution', 'coral_adaptation', 'joint_distribution_adaptation']:
+                    adapted_target_train_features = adapt_func(selected_target_train_features, selected_target_train_features)
+                if len(adapted_source_test_features) > 0:
+                    adapted_source_test_features = adapt_func(adapted_source_test_features, selected_target_train_features)
+        
         else:
-            # mean_shift, coral等方法
-            adapted_source_train_features = adapt_func(source_train_features, target_train_features)
-            adapted_source_test_features = adapt_func(source_test_features, target_train_features)
+            # 单一适应方法
+            adapt_func = get_adaptation_method(adaptation_method)
+            
+            # 根据方法类型应用不同的领域适应
+            if adaptation_method in ['standardization', 'minmax']:
+                adapted_source_train_features, adapt_model = adapt_func(selected_source_train_features, selected_target_train_features)
+                # 使用相同的转换模型处理测试集
+                if adaptation_method == 'standardization':
+                    adapted_source_test_features = adapt_model.transform(adapted_source_test_features)
+                else:  # minmax
+                    adapted_source_test_features = adapt_model.transform(adapted_source_test_features)
+            elif adaptation_method == 'pca':
+                adapted_source_train_features, adapted_target_train_features, adapt_model = adapt_func(
+                    selected_source_train_features, selected_target_train_features,
+                    n_components=config.get('domain_shift.pca_components', None)
+                )
+                # 使用相同的PCA模型处理测试集
+                adapted_source_test_features = adapt_model.transform(adapted_source_test_features)
+                selected_target_test_features = adapt_model.transform(selected_target_test_features)
+            else:
+                # mean_shift, coral等方法
+                adapted_source_train_features = adapt_func(selected_source_train_features, selected_target_train_features)
+                adapted_source_test_features = adapt_func(selected_source_test_features, selected_target_train_features)
         
         # 重新计算MMD
         if mmd_before is not None:
-            mmd_after = calculate_mmd(adapted_source_train_features, target_train_features, kernel='rbf')
+            mmd_after = calculate_mmd(adapted_source_train_features, selected_target_train_features, kernel='rbf')
             print(f"源域与目标域的MMD距离 (适应后): {mmd_after:.6f}")
             print(f"MMD改善率: {(mmd_before - mmd_after) / mmd_before * 100:.2f}%")
             
@@ -494,7 +688,7 @@ def domain_shift_mode(config, args):
     # 在目标域评估
     print("\n在目标域评估模型性能...")
     target_metrics = evaluate_final_model(
-        model, target_test_features, target_test_labels, calibrated_threshold, config
+        model, selected_target_test_features, target_test_labels, calibrated_threshold, config
     )
     
     # 保存结果
@@ -528,6 +722,12 @@ def domain_shift_mode(config, args):
         'threshold_calibration_enabled': enable_threshold_calibration,
         'threshold_calibration_method': calibration_method,
         'calibration_score': calibration_score,
+        'feature_selection_enabled': enable_feature_selection,
+        'feature_selection_method': feature_selection_method,
+        'feature_selection_ratio': feature_selection_ratio,
+        'use_ensemble_selection': use_ensemble_selection,
+        'selected_feature_count': len(selected_feature_indices) if selected_feature_indices is not None else None,
+        'original_feature_count': source_train_features.shape[1],
         'config': dict(config.config)
     }
     
@@ -595,7 +795,7 @@ def evaluate_mode(config, args):
     _, _, test_data = prepare_data(config)
     
     # 提取特征
-    test_features, test_labels = extract_dataset_features(test_data, config)
+    test_features, test_labels = extract_dataset_features(test_data, config, dataset_name="test")
     
     # 确定阈值
     threshold = determine_threshold(

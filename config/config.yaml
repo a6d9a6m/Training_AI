@@ -3,18 +3,18 @@
 
 paths:
   # 数据路径配置
-  data_dir: './dev_data'
-  normal_data_path: './dev_data/normal'
-  anomaly_data_path: './dev_data/anomaly'
+  data_dir: './Project/dev_data'
+  normal_data_path: './Project/dev_data/normal'
+  anomaly_data_path: './Project/dev_data/anomaly'
   # 基础数据目录（用于设备类型加载）
-  base_data_dir: './dev_data'
-  model_save_path: './models/saved_models'
-  features_save_path: './features/saved_features'
-  results_save_path: './results'
-  logs_save_path: './logs'
+  base_data_dir: './Project/dev_data'
+  model_save_path: './Project/models/saved_models'
+  features_save_path: './Project/features/saved_features'
+  results_save_path: './Project/results'
+  logs_save_path: './Project/logs'
   # 新增配置项以匹配代码需求
-  model_dir: './models/saved_models'
-  plots_dir: './results/plots'
+  model_dir: './Project/models/saved_models'
+  plots_dir: './Project/results/plots'
 
 data:
   # 音频数据处理配置
@@ -47,6 +47,8 @@ features:
   fmin: 0                  # 最低频率
   fmax: 8000               # 最高频率
   win_length: 2048         # 窗口长度
+  # 是否使用特征缓存
+  use_cache: true
 
 model:
   # GMM模型配置

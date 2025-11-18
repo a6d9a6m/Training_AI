@@ -3,6 +3,7 @@ import librosa
 import librosa.feature
 import pywt  # 用于小波变换
 from scipy import stats  # 用于更高级的统计特征计算
+import warnings  # 用于抑制警告
 
 
 def extract_mfcc(y, sr, n_mfcc=13, n_fft=2048, hop_length=512, fmin=20, fmax=None, apply_delta=True):
@@ -137,8 +138,24 @@ def extract_melspectrogram(y, sr, n_mels=128, n_fft=2048, hop_length=512, fmin=2
     mel_min = np.min(mel_spectrogram_log, axis=1)
     mel_max = np.max(mel_spectrogram_log, axis=1)
     mel_median = np.median(mel_spectrogram_log, axis=1)
-    mel_skew = stats.skew(mel_spectrogram_log, axis=1)
-    mel_kurtosis = stats.kurtosis(mel_spectrogram_log, axis=1)
+    
+    # 添加数值稳定性处理，避免偏度和峰度计算时的精度损失警告
+    # 1. 对每个频谱帧添加微小扰动以增加数值多样性
+    mel_spectrogram_stable = mel_spectrogram_log.copy()
+    
+    # 只对标准差很小的数据添加扰动
+    small_std_mask = mel_std < 1e-5
+    if np.any(small_std_mask):
+        # 添加微小的高斯噪声作为扰动
+        epsilon = 1e-6
+        noise = np.random.normal(0, epsilon, mel_spectrogram_log.shape)
+        mel_spectrogram_stable = mel_spectrogram_log + noise
+    
+    # 2. 在计算偏度和峰度时抑制警告
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        mel_skew = stats.skew(mel_spectrogram_stable, axis=1)
+        mel_kurtosis = stats.kurtosis(mel_spectrogram_stable, axis=1)
     
     # 水平堆叠所有统计特征
     mel_features = np.hstack([

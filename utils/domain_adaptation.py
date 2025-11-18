@@ -3,13 +3,18 @@ from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
 from sklearn.decomposition import PCA, KernelPCA
 from sklearn.metrics import pairwise_distances, f1_score
 from sklearn.impute import SimpleImputer
-from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif
+from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif, SelectPercentile, RFE, SelectFromModel, SequentialFeatureSelector
 from sklearn.neighbors import KNeighborsClassifier
-from sklearn.svm import LinearSVC
+from sklearn.svm import LinearSVC, SVC
 from sklearn.pipeline import Pipeline
 from sklearn.model_selection import cross_val_score
 from sklearn.isotonic import IsotonicRegression
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier
+import joblib
+import json
+import os
+import warnings
 
 
 def handle_nan(features):
@@ -569,16 +574,17 @@ def calculate_mmd(source_features, target_features, kernel='rbf', gamma=None):
     # 确保结果为非负数
     return max(0, mmd_value)
 
-def select_domain_invariant_features(source_features, source_labels, target_features, k='all'):
+def select_domain_invariant_features(source_features, source_labels, target_features, method='f_statistic', k=0.8):
     """
     选择领域不变特征
-    使用特征选择方法筛选在源域和目标域之间表现稳定的特征
+    使用多种特征选择方法筛选在源域和目标域之间表现稳定的特征
     
     参数:
     source_features: 源域特征数组，形状为 (n_samples, n_features)
     source_labels: 源域标签数组，形状为 (n_samples,)
     target_features: 目标域特征数组，形状为 (n_samples, n_features)
-    k: 选择的特征数量，'all'表示选择所有特征
+    method: 特征选择方法 ('f_statistic', 'mutual_info', 'mmd_based', 'correlation', 'random_forest', 'rfe', 'sequential')
+    k: 选择的特征比例或数量，0.8表示选择前80%的特征
     
     返回:
     selected_source_features: 选择后的源域特征
@@ -591,9 +597,110 @@ def select_domain_invariant_features(source_features, source_labels, target_feat
     target_features = handle_nan(target_features)
     
     try:
-        # 使用F统计量进行特征选择
-        selector = SelectKBest(f_classif, k=k)
-        selector.fit(source_features, source_labels)
+        print(f"使用 {method} 方法进行特征选择")
+        
+        if method == 'f_statistic':
+            # 使用F统计量进行特征选择
+            if isinstance(k, float):
+                selector = SelectPercentile(f_classif, percentile=int(k * 100))
+            else:
+                selector = SelectKBest(f_classif, k=k)
+            selector.fit(source_features, source_labels)
+            
+        elif method == 'mutual_info':
+            # 使用互信息进行特征选择
+            if isinstance(k, float):
+                selector = SelectPercentile(mutual_info_classif, percentile=int(k * 100))
+            else:
+                selector = SelectKBest(mutual_info_classif, k=k)
+            selector.fit(source_features, source_labels)
+            
+        elif method == 'mmd_based':
+            # 基于MMD的特征选择，选择MMD值较小的特征
+            n_features = source_features.shape[1]
+            feature_weights = np.zeros(n_features)
+            
+            # 对每个特征计算MMD值
+            for i in range(n_features):
+                feat_source = source_features[:, i].reshape(-1, 1)
+                feat_target = target_features[:, i].reshape(-1, 1)
+                try:
+                    mmd = calculate_mmd(feat_source, feat_target)
+                    feature_weights[i] = 1.0 / (mmd + 1e-10)  # 特征的权重与MMD成反比
+                except:
+                    feature_weights[i] = 0.0
+            
+            # 排序并选择特征
+            if isinstance(k, float):
+                n_selected = max(1, int(n_features * k))
+            else:
+                n_selected = min(k, n_features)
+            
+            selected_indices = np.argsort(feature_weights)[::-1][:n_selected]
+            selected_source_features = source_features[:, selected_indices]
+            selected_target_features = target_features[:, selected_indices]
+            
+            print(f"已选择 {len(selected_indices)} 个领域不变特征")
+            return selected_source_features, selected_target_features, None, selected_indices
+            
+        elif method == 'correlation':
+            # 选择与标签相关但域间方差小的特征
+            n_features = source_features.shape[1]
+            
+            # 计算特征与标签的相关性
+            corr_with_label = np.zeros(n_features)
+            for i in range(n_features):
+                corr_with_label[i] = np.abs(np.corrcoef(source_features[:, i], source_labels)[0, 1])
+            
+            # 计算特征在域间的变化（标准差比率）
+            domain_variance = np.zeros(n_features)
+            for i in range(n_features):
+                source_std = np.std(source_features[:, i]) if np.std(source_features[:, i]) > 0 else 1e-10
+                target_std = np.std(target_features[:, i]) if np.std(target_features[:, i]) > 0 else 1e-10
+                domain_variance[i] = max(source_std, target_std) / (min(source_std, target_std) + 1e-10)
+            
+            # 综合评分
+            feature_scores = corr_with_label / (domain_variance + 1e-10)
+            
+            # 排序并选择特征
+            if isinstance(k, float):
+                n_selected = max(1, int(n_features * k))
+            else:
+                n_selected = min(k, n_features)
+            
+            selected_indices = np.argsort(feature_scores)[::-1][:n_selected]
+            selected_source_features = source_features[:, selected_indices]
+            selected_target_features = target_features[:, selected_indices]
+            
+            print(f"已选择 {len(selected_indices)} 个领域不变特征")
+            return selected_source_features, selected_target_features, None, selected_indices
+            
+        elif method == 'random_forest':
+            # 使用随机森林的特征重要性进行选择
+            clf = RandomForestClassifier(n_estimators=100, random_state=42)
+            clf.fit(source_features, source_labels)
+            
+            if isinstance(k, float):
+                selector = SelectPercentile(score_func=lambda X, y: clf.feature_importances_, 
+                                         percentile=int(k * 100))
+            else:
+                selector = SelectFromModel(clf, max_features=k, prefit=True)
+            
+        elif method == 'rfe':
+            # 递归特征消除
+            estimator = SVC(kernel="linear")
+            n_selected = int(source_features.shape[1] * k) if isinstance(k, float) else k
+            selector = RFE(estimator, n_features_to_select=n_selected, step=1)
+            selector.fit(source_features, source_labels)
+            
+        elif method == 'sequential':
+            # 序列特征选择
+            estimator = RandomForestClassifier(n_estimators=50, random_state=42)
+            n_selected = int(source_features.shape[1] * k) if isinstance(k, float) else k
+            selector = SequentialFeatureSelector(estimator, n_features_to_select=n_selected, direction='forward')
+            selector.fit(source_features, source_labels)
+        else:
+            raise ValueError(f"不支持的特征选择方法: {method}")
         
         # 获取选择的特征索引
         selected_indices = selector.get_support(indices=True)
@@ -608,6 +715,54 @@ def select_domain_invariant_features(source_features, source_labels, target_feat
         print(f"特征选择失败，使用原始特征: {e}")
         # 如果特征选择失败，返回原始特征
         return source_features, target_features, None, np.arange(source_features.shape[1])
+
+def ensemble_feature_selection(source_features, source_labels, target_features, methods=['f_statistic', 'mutual_info', 'random_forest'], k=0.8):
+    """
+    集成多种特征选择方法
+    使用投票机制从多个特征选择器中选择最稳定的特征
+    
+    参数:
+    source_features: 源域特征数组，形状为 (n_samples, n_features)
+    source_labels: 源域标签数组，形状为 (n_samples,)
+    target_features: 目标域特征数组，形状为 (n_samples, n_features)
+    methods: 要使用的特征选择方法列表
+    k: 每种方法选择的特征比例
+    
+    返回:
+    selected_source_features: 选择后的源域特征
+    selected_target_features: 选择后的目标域特征
+    selected_indices: 选择的特征索引
+    selection_counts: 每个特征被选中的次数
+    """
+    n_features = source_features.shape[1]
+    selection_counts = np.zeros(n_features)
+    
+    # 对每种方法进行特征选择
+    for method in methods:
+        try:
+            _, _, _, selected_indices = select_domain_invariant_features(
+                source_features, source_labels, target_features, method=method, k=k
+            )
+            selection_counts[selected_indices] += 1
+        except Exception as e:
+            print(f"方法 {method} 特征选择失败: {e}")
+    
+    # 确定最终选择的特征（至少被一种方法选中）
+    min_selections = max(1, len(methods) // 2)  # 至少需要被一半的方法选中
+    selected_indices = np.where(selection_counts >= min_selections)[0]
+    
+    # 如果没有足够的特征，选择得票最多的特征
+    if len(selected_indices) == 0:
+        n_selected = max(1, int(n_features * k))
+        selected_indices = np.argsort(selection_counts)[::-1][:n_selected]
+    
+    print(f"集成特征选择: 从 {len(methods)} 种方法中选择了 {len(selected_indices)} 个最稳定的特征")
+    
+    # 选择特征
+    selected_source_features = source_features[:, selected_indices]
+    selected_target_features = target_features[:, selected_indices]
+    
+    return selected_source_features, selected_target_features, selected_indices, selection_counts
 
 def calibration_transfer(source_model, target_unlabeled_features, target_labels=None, method='shift'):
     """
@@ -735,84 +890,221 @@ def get_adaptation_method(method_name):
     
     return methods[method_name]
 
-def ensemble_adaptation(source_features, target_features, methods=None):
+def ensemble_adaptation(source_features, target_features, methods=None, weights=None, strategy='weighted_average', adaptation_config=None):
     """
-    集成多种适应方法的混合策略
-    对多种适应方法的结果进行加权融合
+    集成多种领域适应方法的混合策略
     
-    参数:
-    source_features: 源域特征数组，形状为 (n_samples, n_features)
-    target_features: 目标域特征数组，形状为 (n_samples, n_features)
-    methods: 要集成的方法列表，如果为None，使用默认方法集
+    Args:
+        source_features: 源域特征
+        target_features: 目标域特征
+        methods: 要使用的适应方法列表
+        weights: 各方法的权重，如果为None则根据MMD改善自动计算
+        strategy: 集成策略 ('weighted_average', 'dynamic_weighting', 'stacking', 'voting', 'feature_wise')
+        adaptation_config: 各方法的配置参数字典
     
-    返回:
-    ensemble_features: 集成适应后的源域特征
-    adaptations: 各方法的适应结果字典
+    Returns:
+        集成后的源域特征
     """
     # 处理NaN值
     source_features = handle_nan(source_features)
     target_features = handle_nan(target_features)
     
     if methods is None:
-        # 默认集成方法
-        methods = ['mean_shift', 'coral', 'joint_distribution']
+        methods = ['standardization', 'coral', 'mean_shift']
     
-    adaptations = {}
+    if adaptation_config is None:
+        adaptation_config = {}
     
-    try:
-        # 应用各种适应方法
-        for method_name in methods:
-            try:
-                adapt_func = get_adaptation_method(method_name)
-                
-                # 处理不同返回值的适应方法
-                if method_name in ['standardization', 'minmax', 'robust_scaling']:
-                    adapted, _ = adapt_func(source_features, target_features)
-                elif method_name in ['pca', 'kernel_pca']:
-                    adapted, _, _ = adapt_func(source_features, target_features)
-                else:
-                    adapted = adapt_func(source_features, target_features)
-                
-                adaptations[method_name] = adapted
-                print(f"已应用 {method_name} 适应方法")
-            except Exception as e:
-                print(f"应用 {method_name} 时出错: {e}")
-        
-        # 如果没有成功的适应方法，返回原始特征
-        if not adaptations:
-            print("所有适应方法都失败，返回原始特征")
-            return source_features, {}
-        
-        # 计算MMD并选择最佳权重
-        weights = {}
-        total_mmd = 0
-        
-        for method_name, adapted_features in adaptations.items():
-            try:
-                # 计算MMD，使用MMD的倒数作为权重
-                mmd = calculate_mmd(adapted_features, target_features)
-                # 避免除零错误
-                weights[method_name] = 1.0 / (mmd + 1e-10)
-                total_mmd += weights[method_name]
-            except Exception:
-                weights[method_name] = 1.0  # 默认权重
-                total_mmd += 1.0
-        
-        # 归一化权重
-        for method_name in weights:
-            weights[method_name] /= total_mmd
-        
-        print(f"适应方法权重: {weights}")
-        
-        # 加权融合
-        ensemble_features = np.zeros_like(source_features)
-        for method_name, adapted_features in adaptations.items():
-            ensemble_features += weights[method_name] * adapted_features
-        
-        return handle_nan(ensemble_features), adaptations
-    except Exception as e:
-        print(f"集成适应失败: {e}")
+    # 保存每个方法的结果和MMD改善率
+    adapted_results = []
+    mmd_improvements = []
+    method_results = {}
+    
+    # 计算原始MMD
+    original_mmd = calculate_mmd(source_features, target_features, kernel='rbf')
+    
+    for method_name in methods:
+        try:
+            method_func = get_adaptation_method(method_name)
+            config = adaptation_config.get(method_name, {})
+            
+            # 应用每个方法
+            if method_name == 'pca':
+                n_components = config.get('n_components', None)
+                adapted_features, _, model = method_func(source_features, target_features, n_components=n_components)
+                method_results[method_name] = {'features': adapted_features, 'model': model}
+            elif method_name in ['standardization', 'minmax', 'robust_scaling']:
+                adapted_features, model = method_func(source_features, target_features)
+                method_results[method_name] = {'features': adapted_features, 'model': model}
+            else:
+                adapted_features = method_func(source_features, target_features)
+                method_results[method_name] = {'features': adapted_features}
+            
+            adapted_results.append(adapted_features)
+            
+            # 计算MMD改善率
+            new_mmd = calculate_mmd(adapted_features, target_features, kernel='rbf')
+            improvement = (original_mmd - new_mmd) / original_mmd if original_mmd > 0 else 0
+            mmd_improvements.append(max(improvement, 0))  # 确保非负
+            
+        except Exception as e:
+            print(f"应用方法 {method_name} 时出错: {e}")
+            adapted_results.append(source_features)  # 失败时使用原始特征
+            mmd_improvements.append(0)  # 无改善
+    
+    if not adapted_results:
         return source_features, {}
+    
+    # 根据策略进行集成
+    if strategy == 'weighted_average':
+        # 加权平均策略
+        if weights is None:
+            # 如果没有提供权重，使用等权重
+            weights = np.ones(len(methods)) / len(methods)
+        else:
+            # 归一化权重
+            weights = np.array(weights) / np.sum(weights)
+        
+        final_features = np.zeros_like(source_features)
+        for i, adapted in enumerate(adapted_results):
+            final_features += adapted * weights[i]
+    
+    elif strategy == 'dynamic_weighting':
+        # 动态权重策略：根据MMD改善率动态调整权重
+        if np.sum(mmd_improvements) > 0:
+            weights = np.array(mmd_improvements) / np.sum(mmd_improvements)
+        else:
+            weights = np.ones(len(methods)) / len(methods)
+        
+        final_features = np.zeros_like(source_features)
+        for i, adapted in enumerate(adapted_results):
+            final_features += adapted * weights[i]
+    
+    elif strategy == 'stacking':
+        # 堆叠策略：在不同适应方法的结果上应用第二层变换
+        from sklearn.preprocessing import StandardScaler
+        from sklearn.decomposition import PCA
+        
+        # 水平堆叠所有适应方法的结果
+        stacked_features = np.hstack(adapted_results)
+        
+        # 应用PCA降维到原始维度
+        pca = PCA(n_components=min(source_features.shape[1], stacked_features.shape[1]))
+        final_features = pca.fit_transform(stacked_features)
+    
+    elif strategy == 'voting':
+        # 投票策略：选择MMD改善最大的前k个方法的平均
+        k = min(3, len(methods))  # 选择改善最大的前3个方法
+        top_indices = np.argsort(mmd_improvements)[-k:]
+        
+        final_features = np.mean([adapted_results[i] for i in top_indices], axis=0)
+    
+    elif strategy == 'feature_wise':
+        # 特征级集成：对每个特征维度选择最佳的适应方法
+        final_features = np.zeros_like(source_features)
+        
+        # 计算每个特征维度的差异（领域偏移程度）
+        source_mean = np.mean(source_features, axis=0)
+        target_mean = np.mean(target_features, axis=0)
+        feature_diff = np.abs(source_mean - target_mean)
+        
+        for i in range(source_features.shape[1]):
+            # 对于每个特征，选择在该特征上表现最好的方法
+            best_method_idx = 0
+            best_feature_improvement = -np.inf
+            
+            for j, adapted in enumerate(adapted_results):
+                # 计算该特征的改善
+                adapted_mean = np.mean(adapted, axis=0)
+                new_diff = np.abs(adapted_mean[i] - target_mean[i])
+                feature_improvement = (feature_diff[i] - new_diff) / (feature_diff[i] + 1e-10)
+                
+                if feature_improvement > best_feature_improvement:
+                    best_feature_improvement = feature_improvement
+                    best_method_idx = j
+            
+            # 使用最佳方法的该特征
+            final_features[:, i] = adapted_results[best_method_idx][:, i]
+    
+    else:
+        raise ValueError(f"不支持的集成策略: {strategy}")
+    
+    return handle_nan(final_features), method_results
+
+def get_best_adaptation_method(source_features, source_labels, target_features, target_labels=None, methods=None):
+    """
+    根据验证性能自动选择最佳的适应方法
+    
+    参数:
+        source_features: 源域特征
+        source_labels: 源域标签
+        target_features: 目标域特征
+        target_labels: 目标域标签（用于有监督评估）
+        methods: 要评估的方法列表
+    
+    返回:
+        best_method: 最佳方法名称
+        best_score: 最佳得分
+    """
+    from sklearn.svm import SVC
+    from sklearn.metrics import f1_score
+    
+    if methods is None:
+        methods = ['standardization', 'coral', 'mean_shift', 'pca', 'joint_distribution']
+    
+    scores = []
+    
+    # 在源域上训练一个简单的分类器作为评估器
+    clf = SVC(kernel='rbf', probability=True)
+    clf.fit(source_features, source_labels)
+    
+    for method_name in methods:
+        try:
+            method_func = get_adaptation_method(method_name)
+            
+            # 应用适应方法
+            if method_name == 'pca':
+                adapted_features, _, _ = method_func(source_features, target_features)
+                adapted_target = method_func(target_features, target_features)[0]  # 自转换目标域
+            elif method_name in ['standardization', 'minmax', 'robust_scaling']:
+                adapted_features, model = method_func(source_features, target_features)
+                adapted_target = model.transform(target_features)
+            else:
+                adapted_features = method_func(source_features, target_features)
+                adapted_target = method_func(target_features, target_features)
+            
+            # 评估MMD改善
+            original_mmd = calculate_mmd(source_features, target_features)
+            adapted_mmd = calculate_mmd(adapted_features, adapted_target)
+            mmd_improvement = (original_mmd - adapted_mmd) / original_mmd if original_mmd > 0 else 0
+            
+            # 如果有目标域标签，使用分类性能作为评分
+            if target_labels is not None and len(target_labels) > 0:
+                # 在适应后的特征上重新训练分类器
+                adapted_clf = SVC(kernel='rbf', probability=True)
+                adapted_clf.fit(adapted_features, source_labels)
+                
+                # 在目标域上评估
+                y_pred = adapted_clf.predict(adapted_target)
+                f1 = f1_score(target_labels, y_pred, average='weighted') if len(np.unique(y_pred)) > 1 else 0
+                
+                # 综合评分：70% F1 + 30% MMD改善
+                score = 0.7 * f1 + 0.3 * mmd_improvement
+            else:
+                # 无监督情况下使用MMD改善作为评分
+                score = mmd_improvement
+            
+            scores.append((method_name, score))
+            
+        except Exception as e:
+            print(f"评估方法 {method_name} 时出错: {e}")
+            scores.append((method_name, -np.inf))
+    
+    if scores:
+        best_method, best_score = max(scores, key=lambda x: x[1])
+        return best_method, best_score
+    else:
+        return 'none', -np.inf
 
 # 更新方法字典以包含集成方法
 def get_adaptation_method(method_name):
@@ -850,5 +1142,5 @@ __all__ = ['handle_nan', 'calculate_mmd', 'matrix_sqrt', 'get_adaptation_method'
            'mean_shift_adaptation', 'standardization_adaptation', 'minmax_normalization_adaptation',
            'pca_alignment_adaptation', 'coral_adaptation', 'robust_mean_shift_adaptation',
            'robust_scaling_adaptation', 'kernel_pca_alignment_adaptation', 'joint_distribution_adaptation',
-           'select_domain_invariant_features', 'ensemble_adaptation', 'calibration_transfer',
-           'calibrate_threshold', 'transfer_threshold_with_unlabeled']
+           'select_domain_invariant_features', 'ensemble_feature_selection', 'ensemble_adaptation', 'calibration_transfer',
+           'calibrate_threshold', 'transfer_threshold_with_unlabeled', 'get_best_adaptation_method']
