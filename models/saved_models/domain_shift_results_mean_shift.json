@@ -1,2 +1,184 @@
 {
-  "threshold": 
+  "source_threshold": -611.8583067530458,
+  "calibrated_threshold": -611.8583067530458,
+  "optimal_components": 1,
+  "adaptation_method": "mean_shift",
+  "mmd_before": 0.0030117253394608134,
+  "mmd_after": 0.001236893278422635,
+  "source_domain_metrics": {
+    "accuracy": 0.5,
+    "precision": 0.75,
+    "recall": 0.5,
+    "f1": 0.3333333333333333,
+    "class_precision": [
+      0.5,
+      1.0
+    ],
+    "class_recall": [
+      1.0,
+      0.0
+    ],
+    "class_f1": [
+      0.6666666666666666,
+      0.0
+    ],
+    "confusion_matrix": [
+      [
+        300,
+        0
+      ],
+      [
+        300,
+        0
+      ]
+    ],
+    "roc_auc": 0.5,
+    "classification_report": "              precision    recall  f1-score   support\n\n      normal       0.50      1.00      0.67       300\n     anomaly       0.00      0.00      0.00       300\n\n    accuracy                           0.50       600\n   macro avg       0.25      0.50      0.33       600\nweighted avg       0.25      0.50      0.33       600\n"
+  },
+  "target_domain_metrics": {
+    "accuracy": 0.5,
+    "precision": 0.75,
+    "recall": 0.5,
+    "f1": 0.3333333333333333,
+    "class_precision": [
+      0.5,
+      1.0
+    ],
+    "class_recall": [
+      1.0,
+      0.0
+    ],
+    "class_f1": [
+      0.6666666666666666,
+      0.0
+    ],
+    "confusion_matrix": [
+      [
+        300,
+        0
+      ],
+      [
+        300,
+        0
+      ]
+    ],
+    "roc_auc": 0.5,
+    "classification_report": "              precision    recall  f1-score   support\n\n      normal       0.50      1.00      0.67       300\n     anomaly       0.00      0.00      0.00       300\n\n    accuracy                           0.50       600\n   macro avg       0.25      0.50      0.33       600\nweighted avg       0.25      0.50      0.33       600\n"
+  },
+  "threshold_calibration_enabled": true,
+  "threshold_calibration_method": "f1_optimization",
+  "calibration_score": 0.0,
+  "feature_selection_enabled": false,
+  "feature_selection_method": "mmd_based",
+  "feature_selection_ratio": 0.8,
+  "use_ensemble_selection": false,
+  "selected_feature_count": null,
+  "original_feature_count": 1370,
+  "config": {
+    "paths": {
+      "data_dir": "./Project/dev_data",
+      "normal_data_path": "./Project/dev_data/normal",
+      "anomaly_data_path": "./Project/dev_data/anomaly",
+      "base_data_dir": "./Project/dev_data",
+      "model_save_path": "./Project/models/saved_models",
+      "features_save_path": "./Project/features/saved_features",
+      "results_save_path": "./Project/results",
+      "logs_save_path": "./Project/logs",
+      "model_dir": "./Project/models/saved_models",
+      "plots_dir": "./Project/results/plots"
+    },
+    "data": {
+      "sample_rate": 22050,
+      "duration": 2.0,
+      "mono": true,
+      "normalize": true,
+      "train_val_split": 0.8,
+      "batch_size": 32,
+      "use_device_type": true,
+      "device_type": "fan",
+      "supported_devices": [
+        "fan",
+        "pump",
+        "slider",
+        "valve",
+        "gearbox",
+        "bearing",
+        "others"
+      ],
+      "enable_domain_shift": true
+    },
+    "features": {
+      "extract_features": [
+        "mfcc",
+        "melspectrogram",
+        "chroma",
+        "spectral_contrast",
+        "zcr",
+        "rms"
+      ],
+      "n_mfcc": 13,
+      "n_fft": 2048,
+      "hop_length": 512,
+      "n_mels": 128,
+      "fmin": 0,
+      "fmax": 8000,
+      "win_length": 2048,
+      "use_cache": true
+    },
+    "model": {
+      "type": "gmm",
+      "n_components": 8,
+      "covariance_type": "full",
+      "max_iter": 100,
+      "n_init": 3,
+      "tol": 0.001,
+      "reg_covar": "1e-06"
+    },
+    "training": {
+      "cross_validation": true,
+      "cv_folds": 5,
+      "optimize_components": true,
+      "component_range": [
+        2,
+        4,
+        8,
+        16,
+        32
+      ],
+      "random_state": 42
+    },
+    "evaluation": {
+      "threshold_method": "f1",
+      "n_thresholds": 100,
+      "target_metric": "f1",
+      "plot_metrics": true,
+      "save_plots": true
+    },
+    "real_time": {
+      "buffer_size": 2048,
+      "hop_length": 512,
+      "window_length": 2,
+      "detection_threshold": 0.5,
+      "consecutive_frames": 3
+    },
+    "domain_shift": {
+      "enable_domain_shift": true,
+      "adaptation_method": "mean_shift",
+      "available_methods": [
+        "mean_shift",
+        "standardization",
+        "minmax",
+        "pca",
+        "coral"
+      ],
+      "pca_components": null,
+      "pca_whiten": true,
+      "mmd_kernel": "rbf",
+      "mmd_sigma": 1.0,
+      "source_domain": "source",
+      "target_domain": "target",
+      "evaluate_both_domains": true,
+      "plot_domain_comparison": true
+    }
+  }
+}

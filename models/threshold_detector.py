@@ -77,7 +77,7 @@ class ThresholdDetector:
             # 应用阈值进行预测
             y_pred = (anomaly_scores >= threshold).astype(int)
             # 计算F1分数
-            f1 = f1_score(y_val, y_pred, pos_label=anomaly_class)
+            f1 = f1_score(y_val, y_pred, pos_label=anomaly_class, zero_division=1)
             f1_scores.append(f1)
         
         # 找到最佳阈值
@@ -414,7 +414,7 @@ def find_optimal_threshold(model, X_val, y_val, method='f1', **kwargs):
     **kwargs: 传递给相应优化方法的参数
     
     返回:
-    detector: 配置好的ThresholdDetector实例
+    best_threshold: 最佳阈值值
     """
     detector = ThresholdDetector(model)
     
@@ -427,4 +427,4 @@ def find_optimal_threshold(model, X_val, y_val, method='f1', **kwargs):
     else:
         raise ValueError(f"不支持的优化方法: {method}")
     
-    return detector
+    return detector.best_threshold if detector.best_threshold is not None else 0.0

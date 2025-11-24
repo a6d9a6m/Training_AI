@@ -1,10 +1,16 @@
 import numpy as np
 import matplotlib.pyplot as plt
+# 设置matplotlib字体以支持中文并抑制字体警告
+plt.rcParams['font.sans-serif'] = ['SimHei']  # 用来正常显示中文标签
+plt.rcParams['axes.unicode_minus'] = False  # 用来正常显示负号
+import warnings
+warnings.filterwarnings('ignore', category=UserWarning, module='matplotlib')
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     confusion_matrix, classification_report, roc_auc_score,
     precision_recall_curve, roc_curve
 )
+from models.threshold_detector import ThresholdDetector, find_optimal_threshold
 
 
 class ModelEvaluator:
@@ -48,7 +54,7 @@ class ModelEvaluator:
         self.threshold_detector = threshold_detector
         return self
     
-    def predict(self, X, y_true, threshold=None, normal_class=0, anomaly_class=1):
+    def predict(self, X, y_true, threshold=None, normal_class=0, anomaly_class=1, scores=None):
         """
         使用模型进行预测并保存结果
         
@@ -58,45 +64,78 @@ class ModelEvaluator:
         threshold: 阈值，如果为None则使用阈值检测器的最佳阈值
         normal_class: 正常类的标签
         anomaly_class: 异常类的标签
+        scores: 可选，预先计算的异常分数（如重构误差）
         
         返回:
         y_pred: 预测标签
         y_score: 异常分数
         """
-        if self.threshold_detector is not None:
+        # 如果提供了预先计算的分数，则直接使用
+        if scores is not None:
+            y_score = scores
+            # 根据阈值进行预测
+            if threshold is not None:
+                y_pred = (scores > threshold).astype(int)
+            else:
+                # 如果没有提供阈值，尝试从模型获取
+                if hasattr(self.model, 'threshold'):
+                    y_pred = (scores > self.model.threshold).astype(int)
+                else:
+                    # 默认阈值为0.0
+                    print("警告: 没有提供阈值且模型没有threshold属性，使用默认阈值0.0")
+                    y_pred = (scores > 0.0).astype(int)
+        elif self.threshold_detector is not None:
             y_pred, y_score = self.threshold_detector.apply_threshold(
                 X, threshold, normal_class, anomaly_class
             )
         elif self.model is not None:
-            # 如果只有模型，直接使用模型的预测功能
-            y_pred = self.model.predict(X)
-            # 尝试获取分数
-            if hasattr(self.model, 'predict_proba'):
-                try:
-                    # 尝试获取异常类的概率
-                    proba = self.model.predict_proba(X)
-                    # 检查是否有足够的类别
-                    if proba.shape[1] > anomaly_class:
-                        y_score = proba[:, anomaly_class]
-                    else:
-                        # 单类别情况，使用负的正常类概率作为异常分数
-                        print(f"警告: 模型只有{proba.shape[1]}个类别，使用单类别模式")
-                        y_score = -proba[:, normal_class]
-                except Exception as e:
-                    print(f"获取预测概率时出错: {e}")
-                    y_score = None
-            elif hasattr(self.model, 'get_class_likelihood'):
-                try:
-                    normal_likelihoods = self.model.get_class_likelihood(X, normal_class)
-                    # 尝试获取异常类的似然概率
-                    anomaly_likelihoods = self.model.get_class_likelihood(X, anomaly_class)
-                    y_score = anomaly_likelihoods - normal_likelihoods
-                except ValueError:
-                    # 单类别情况，使用负的正常类似然作为异常分数
-                    print(f"警告: 模型中不存在异常类 {anomaly_class}，使用单类别模式")
-                    y_score = -normal_likelihoods
+            # 检查是否是自动编码器模型（有calculate_reconstruction_error方法）
+            if hasattr(self.model, 'calculate_reconstruction_error'):
+                print("使用自动编码器模型进行预测")
+                
+                # 计算重构误差作为异常分数
+                y_score = self.model.calculate_reconstruction_error(X)
+                
+                # 根据阈值进行预测
+                if threshold is not None:
+                    y_pred = (y_score > threshold).astype(int)
+                elif hasattr(self.model, 'threshold'):
+                    y_pred = (y_score > self.model.threshold).astype(int)
+                elif hasattr(self.model, 'reconstruction_threshold'):
+                    y_pred = (y_score > self.model.reconstruction_threshold).astype(int)
+                else:
+                    raise ValueError("自动编码器模型没有设置阈值")
             else:
-                y_score = None
+                # 传统分类模型预测
+                # 如果只有模型，直接使用模型的预测功能
+                y_pred = self.model.predict(X)
+                # 尝试获取分数
+                if hasattr(self.model, 'predict_proba'):
+                    try:
+                        # 尝试获取异常类的概率
+                        proba = self.model.predict_proba(X)
+                        # 检查是否有足够的类别
+                        if proba.shape[1] > anomaly_class:
+                            y_score = proba[:, anomaly_class]
+                        else:
+                            # 单类别情况，使用负的正常类概率作为异常分数
+                            print(f"警告: 模型只有{proba.shape[1]}个类别，使用单类别模式")
+                            y_score = -proba[:, normal_class]
+                    except Exception as e:
+                        print(f"获取预测概率时出错: {e}")
+                        y_score = None
+                elif hasattr(self.model, 'get_class_likelihood'):
+                    try:
+                        normal_likelihoods = self.model.get_class_likelihood(X, normal_class)
+                        # 尝试获取异常类的似然概率
+                        anomaly_likelihoods = self.model.get_class_likelihood(X, anomaly_class)
+                        y_score = anomaly_likelihoods - normal_likelihoods
+                    except ValueError:
+                        # 单类别情况，使用负的正常类似然作为异常分数
+                        print(f"警告: 模型中不存在异常类 {anomaly_class}，使用单类别模式")
+                        y_score = -normal_likelihoods
+                else:
+                    y_score = None
         else:
             raise ValueError("请设置模型或阈值检测器")
         
@@ -124,12 +163,12 @@ class ModelEvaluator:
         
         # 基本分类指标
         metrics['accuracy'] = accuracy_score(self.y_true, self.y_pred)
-        metrics['precision'] = precision_score(self.y_true, self.y_pred, average='macro')
+        metrics['precision'] = precision_score(self.y_true, self.y_pred, average='macro', zero_division=1)
         metrics['recall'] = recall_score(self.y_true, self.y_pred, average='macro')
         metrics['f1'] = f1_score(self.y_true, self.y_pred, average='macro')
         
         # 类别的具体指标
-        metrics['class_precision'] = precision_score(self.y_true, self.y_pred, average=None)
+        metrics['class_precision'] = precision_score(self.y_true, self.y_pred, average=None, zero_division=1)
         metrics['class_recall'] = recall_score(self.y_true, self.y_pred, average=None)
         metrics['class_f1'] = f1_score(self.y_true, self.y_pred, average=None)
         
@@ -232,6 +271,58 @@ class ModelEvaluator:
             print(f"混淆矩阵已保存到 {save_path}")
         else:
             plt.show()
+    
+    def calculate_auc(self):
+        """
+        计算AUC指标
+        
+        返回:
+        auc: ROC AUC分数
+        """
+        if self.y_true is None or self.y_score is None:
+            raise ValueError("请确保运行了predict方法并获得了预测分数")
+        
+        # 检查是否是多类别
+        classes = np.unique(self.y_true)
+        if len(classes) == 2:
+            # 二分类情况
+            try:
+                return roc_auc_score(self.y_true, self.y_score)
+            except ValueError:
+                print("警告: 无法计算AUC，可能是因为只有一个类别")
+                return None
+        else:
+            # 多类别情况，计算每个类别的AUC
+            auc_scores = {}
+            for cls in classes:
+                # 二值化标签
+                y_true_binary = (self.y_true == cls).astype(int)
+                
+                # 如果有概率分数，使用对应类别的概率
+                if len(self.y_score.shape) > 1 and self.y_score.shape[1] == len(classes):
+                    y_score_binary = self.y_score[:, list(classes).index(cls)]
+                else:
+                    # 否则使用模型特定的方式获取分数
+                    try:
+                        y_score_binary = self.y_score
+                    except:
+                        print(f"无法为类别 {cls} 计算AUC")
+                        continue
+                
+                try:
+                    auc_scores[cls] = roc_auc_score(y_true_binary, y_score_binary)
+                except ValueError:
+                    print(f"警告: 无法为类别 {cls} 计算AUC，可能是因为只有一个类别")
+                    auc_scores[cls] = None
+            
+            # 计算macro平均AUC
+            valid_aucs = [auc for auc in auc_scores.values() if auc is not None]
+            if valid_aucs:
+                auc_scores['macro_average'] = np.mean(valid_aucs)
+            else:
+                auc_scores['macro_average'] = None
+            
+            return auc_scores
     
     def plot_roc_curve(self, save_path=None, target_names=None):
         """
@@ -433,10 +524,43 @@ class ModelEvaluator:
             plt.show()
 
 
-def evaluate_model(model, X_test, y_test, threshold=None, threshold_detector=None, 
-                  target_names=['normal', 'anomaly'], output_dir=None):
+def determine_threshold(model, val_features, val_labels, config, threshold=None):
     """
-    评估模型性能的便捷函数
+    确定最佳分类阈值
+    
+    参数:
+    model: 训练好的模型
+    val_features: 验证集特征
+    val_labels: 验证集标签
+    config: 配置对象
+    threshold: 如果指定，则直接使用该阈值
+    
+    返回:
+    optimal_threshold: 最佳阈值
+    """
+    if threshold is not None:
+        print(f"使用指定的阈值: {threshold}")
+        return threshold
+    
+    if val_features is None or val_labels is None:
+        print("没有验证集，使用默认阈值: 0.0")
+        return 0.0
+    
+    print("正在确定最佳阈值...")
+    method = config.get('evaluation.threshold_method', 'f1_score')
+    
+    optimal_threshold = find_optimal_threshold(
+        model, val_features, val_labels,
+        method=method
+    )
+    
+    print(f"最佳阈值 ({method}): {optimal_threshold}")
+    return optimal_threshold
+
+def evaluate_model(model, X_test, y_test, threshold=None, threshold_detector=None, 
+                  target_names=['normal', 'anomaly'], output_dir=None, scores=None):
+    """
+    评估模型性能的便捷函数，重点关注AUC指标作为主要评估指标
     
     参数:
     model: 要评估的模型
@@ -446,6 +570,7 @@ def evaluate_model(model, X_test, y_test, threshold=None, threshold_detector=Non
     threshold_detector: 阈值检测器
     target_names: 类别名称列表
     output_dir: 输出目录，如果不为None则保存图表
+    scores: 可选，预先计算的异常分数（如重构误差）
     
     返回:
     evaluator: 配置好的ModelEvaluator实例
@@ -454,13 +579,58 @@ def evaluate_model(model, X_test, y_test, threshold=None, threshold_detector=Non
     evaluator = ModelEvaluator(model, threshold_detector)
     
     # 进行预测
-    evaluator.predict(X_test, y_test, threshold)
+    evaluator.predict(X_test, y_test, threshold, scores=scores)
     
     # 计算指标
     metrics = evaluator.calculate_metrics(target_names)
     
-    # 打印评估结果
-    evaluator.print_metrics(target_names)
+    # --- 重点强调AUC指标作为主要评估指标 ---
+    # 打印模型类型信息
+    model_type = "自动编码器" if hasattr(model, 'calculate_reconstruction_error') else "传统分类器"
+    print(f"\n===== 模型评估结果 ({model_type}) =====")
+    
+    # 特别计算和输出AUC指标，如果calculate_auc方法不存在则直接使用metrics中的roc_auc
+    auc_score = None
+    if hasattr(evaluator, 'calculate_auc') and evaluator.y_score is not None:
+        try:
+            auc_result = evaluator.calculate_auc()
+            if auc_result is not None:
+                auc_score = auc_result
+                metrics['auc'] = auc_result
+        except Exception as e:
+            print(f"计算AUC时出错: {e}")
+    
+    # 如果上面没有获取到AUC，尝试从metrics中获取
+    if auc_score is None and 'roc_auc' in metrics and metrics['roc_auc'] is not None:
+        auc_score = metrics['roc_auc']
+    
+    # 优先显示AUC指标
+    if auc_score is not None:
+        print("\n【主要评估指标】")
+        if isinstance(auc_score, dict):
+            # 多类别情况
+            for cls, score in auc_score.items():
+                if cls == 'macro_average':
+                    print(f"  宏观平均AUC: {score:.4f}")
+                else:
+                    cls_name = target_names[list(np.unique(y_test)).index(cls)] if target_names else f"类别 {cls}"
+                    print(f"  {cls_name} AUC: {score:.4f}")
+        else:
+            # 二分类情况
+            print(f"  AUC: {auc_score:.4f}")
+    else:
+        print("\n【警告】无法计算AUC指标，可能是因为测试集中只有一个类别")
+    
+    # 打印其他评估指标
+    print("\n【其他评估指标】")
+    print(f"  准确率 (Accuracy): {metrics['accuracy']:.4f}")
+    print(f"  精确率 (Precision): {metrics['precision']:.4f}")
+    print(f"  召回率 (Recall): {metrics['recall']:.4f}")
+    print(f"  F1分数 (F1 Score): {metrics['f1']:.4f}")
+    
+    # 打印分类报告获取详细信息
+    print("\n【详细分类报告】")
+    print(metrics['classification_report'])
     
     # 如果指定了输出目录，保存图表
     if output_dir:
@@ -487,5 +657,23 @@ def evaluate_model(model, X_test, y_test, threshold=None, threshold_detector=Non
         
         # 保存性能汇总图
         evaluator.plot_performance_summary(save_path=os.path.join(output_dir, 'performance_summary.png'))
+    
+    # 打印模型评估总结
+    print("\n===== 评估总结 =====")
+    if auc_score is not None:
+        final_auc = auc_score['macro_average'] if isinstance(auc_score, dict) else auc_score
+        print(f"模型性能主要评估指标 (AUC): {final_auc:.4f}")
+        # 添加AUC解释性评价
+        if final_auc >= 0.9:
+            print("评估: 优秀 - 模型具有出色的区分能力")
+        elif final_auc >= 0.8:
+            print("评估: 良好 - 模型具有良好的区分能力")
+        elif final_auc >= 0.7:
+            print("评估: 一般 - 模型具有基本的区分能力")
+        else:
+            print("评估: 较差 - 模型区分能力有限，建议改进")
+    
+    print(f"最佳阈值: {threshold}")
+    print("===================")
     
     return evaluator, metrics

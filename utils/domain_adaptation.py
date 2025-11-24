@@ -1,4 +1,6 @@
 import numpy as np
+import torch
+import torch.nn as nn
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
 from sklearn.decomposition import PCA, KernelPCA
 from sklearn.metrics import pairwise_distances, f1_score
@@ -1138,7 +1140,215 @@ def get_adaptation_method(method_name):
     return methods[method_name]
 
 # 导出阈值校准函数，使其在main.py中可用
-__all__ = ['handle_nan', 'calculate_mmd', 'matrix_sqrt', 'get_adaptation_method',
+class MMDAdaptationTrainer:
+    """
+    结合MMD领域适应的自动编码器训练器
+    用于训练能对齐源域和目标域数据分布的自动编码器
+    """
+    
+    def __init__(self, model, lambda_mmd=0.1):
+        """
+        初始化MMD适应训练器
+        
+        参数:
+        model: 自动编码器模型
+        lambda_mmd: MMD损失的权重系数
+        """
+        self.model = model
+        self.lambda_mmd = lambda_mmd
+        self.recon_criterion = nn.MSELoss()
+    
+    def train_epoch(self, source_loader, target_loader, optimizer, epoch, verbose=True):
+        """
+        训练一个epoch
+        
+        参数:
+        source_loader: 源域数据加载器（仅正常样本）
+        target_loader: 目标域数据加载器（仅正常样本）
+        optimizer: 优化器
+        epoch: 当前epoch数
+        verbose: 是否打印训练信息
+        
+        返回:
+        epoch_loss: 当前epoch的总损失
+        recon_loss: 重构损失
+        mmd_loss: MMD损失
+        """
+        self.model.train()
+        total_loss = 0
+        total_recon_loss = 0
+        total_mmd_loss = 0
+        
+        # 确定迭代次数（取两者中的较大值）
+        max_iter = max(len(source_loader), len(target_loader))
+        source_iter = iter(source_loader)
+        target_iter = iter(target_loader)
+        
+        for i in range(max_iter):
+            try:
+                source_batch = next(source_iter)
+            except StopIteration:
+                source_iter = iter(source_loader)
+                source_batch = next(source_iter)
+            
+            try:
+                target_batch = next(target_iter)
+            except StopIteration:
+                target_iter = iter(target_loader)
+                target_batch = next(target_iter)
+            
+            # 提取数据并移动到设备
+            source_features = source_batch[0].to(self.model.device)
+            target_features = target_batch[0].to(self.model.device)
+            
+            # 梯度清零
+            optimizer.zero_grad()
+            
+            # 前向传播：源域
+            source_encoded, source_recon = self.model(source_features)
+            
+            # 前向传播：目标域
+            target_encoded, target_recon = self.model(target_features)
+            
+            # 计算重构损失
+            recon_loss_source = self.recon_criterion(source_recon, source_features)
+            recon_loss_target = self.recon_criterion(target_recon, target_features)
+            recon_loss = (recon_loss_source + recon_loss_target) / 2
+            
+            # 计算MMD损失（在潜在空间中）
+            # 使用numpy版本的calculate_mmd函数
+            source_encoded_np = source_encoded.detach().cpu().numpy()
+            target_encoded_np = target_encoded.detach().cpu().numpy()
+            mmd_loss_np = calculate_mmd(source_encoded_np, target_encoded_np, kernel='rbf')
+            mmd_loss = torch.tensor(mmd_loss_np, requires_grad=True, device=self.model.device)
+            
+            # 总损失 = 重构损失 + lambda * MMD损失
+            total_batch_loss = recon_loss + self.lambda_mmd * mmd_loss
+            
+            # 反向传播和优化
+            total_batch_loss.backward()
+            optimizer.step()
+            
+            # 累计损失
+            batch_size = source_features.size(0) + target_features.size(0)
+            total_loss += total_batch_loss.item() * batch_size
+            total_recon_loss += recon_loss.item() * batch_size
+            total_mmd_loss += mmd_loss.item() * batch_size
+        
+        # 计算平均损失
+        total_samples = len(source_loader.dataset) + len(target_loader.dataset)
+        epoch_loss = total_loss / total_samples
+        epoch_recon_loss = total_recon_loss / total_samples
+        epoch_mmd_loss = total_mmd_loss / total_samples
+        
+        if verbose and (epoch + 1) % 10 == 0:
+            print(f'Epoch [{epoch+1}], Total Loss: {epoch_loss:.6f}, '\
+                  f'Recon Loss: {epoch_recon_loss:.6f}, '\
+                  f'MMD Loss: {epoch_mmd_loss:.6f}')
+        
+        return epoch_loss, epoch_recon_loss, epoch_mmd_loss
+    
+    def train(self, source_loader, target_loader, optimizer, epochs=100, verbose=True):
+        """
+        完整训练过程
+        
+        参数:
+        source_loader: 源域数据加载器（仅正常样本）
+        target_loader: 目标域数据加载器（仅正常样本）
+        optimizer: 优化器
+        epochs: 训练轮数
+        verbose: 是否打印训练信息
+        
+        返回:
+        losses: 训练过程中的损失记录
+        """
+        losses = {
+            'total_loss': [],
+            'recon_loss': [],
+            'mmd_loss': []
+        }
+        
+        for epoch in range(epochs):
+            epoch_loss, epoch_recon_loss, epoch_mmd_loss = self.train_epoch(
+                source_loader, target_loader, optimizer, epoch, verbose
+            )
+            
+            # 记录损失
+            losses['total_loss'].append(epoch_loss)
+            losses['recon_loss'].append(epoch_recon_loss)
+            losses['mmd_loss'].append(epoch_mmd_loss)
+        
+        if verbose:
+            print('训练完成')
+        
+        return losses
+    
+    def set_lambda_mmd(self, lambda_mmd):
+        """
+        调整MMD损失的权重系数
+        
+        参数:
+        lambda_mmd: 新的MMD损失权重
+        """
+        self.lambda_mmd = lambda_mmd
+        print(f"MMD损失权重已设置为: {lambda_mmd}")
+
+def evaluate_domain_adaptation(model, source_loader, target_loader, layer='encoded'):
+    """
+    评估域适应的效果
+    
+    参数:
+    model: 训练好的模型
+    source_loader: 源域数据加载器
+    target_loader: 目标域数据加载器
+    layer: 要评估的层，可选 'encoded' (潜在空间) 或 'recon' (重构空间)
+    
+    返回:
+    distance: 适应后的域间距离
+    """
+    model.eval()
+    source_features_list = []
+    target_features_list = []
+    
+    with torch.no_grad():
+        # 收集源域特征
+        for batch_features, _ in source_loader:
+            batch_features = batch_features.to(model.device)
+            
+            if layer == 'encoded':
+                features = model.encode(batch_features)
+            elif layer == 'recon':
+                _, features = model(batch_features)
+            else:
+                raise ValueError(f"不支持的层类型: {layer}")
+            
+            source_features_list.append(features.cpu().numpy())
+        
+        # 收集目标域特征
+        for batch_features, _ in target_loader:
+            batch_features = batch_features.to(model.device)
+            
+            if layer == 'encoded':
+                features = model.encode(batch_features)
+            elif layer == 'recon':
+                _, features = model(batch_features)
+            else:
+                raise ValueError(f"不支持的层类型: {layer}")
+            
+            target_features_list.append(features.cpu().numpy())
+    
+    # 合并特征
+    source_features = np.vstack(source_features_list)
+    target_features = np.vstack(target_features_list)
+    
+    # 计算域间距离
+    distance = calculate_mmd(source_features, target_features)
+    
+    print(f"域适应评估结果 - {layer}空间的MMD距离: {distance:.6f}")
+    
+    return distance
+
+__all__ = ['handle_nan', 'calculate_mmd', 'matrix_sqrt', 'get_adaptation_method', 'MMDAdaptationTrainer', 'evaluate_domain_adaptation',
            'mean_shift_adaptation', 'standardization_adaptation', 'minmax_normalization_adaptation',
            'pca_alignment_adaptation', 'coral_adaptation', 'robust_mean_shift_adaptation',
            'robust_scaling_adaptation', 'kernel_pca_alignment_adaptation', 'joint_distribution_adaptation',

@@ -27,8 +27,9 @@ from utils.data_loader import load_dataset, load_audio
 from features.extract_features import extract_all_features, extract_features_from_files
 from models.gmm_model import GMMModel, train_gmm_model, find_optimal_components
 from models.threshold_detector import ThresholdDetector, find_optimal_threshold
+from models.autoencoder import AudioAutoencoder
 from utils.evaluator import ModelEvaluator, evaluate_model
-from utils.domain_adaptation import get_adaptation_method, calculate_mmd, calibrate_threshold, transfer_threshold_with_unlabeled, select_domain_invariant_features, ensemble_feature_selection, ensemble_adaptation, get_best_adaptation_method
+from utils.domain_adaptation import get_adaptation_method, calculate_mmd, calibrate_threshold, transfer_threshold_with_unlabeled, select_domain_invariant_features, ensemble_feature_selection, ensemble_adaptation, get_best_adaptation_method, MMDAdaptationTrainer
 
 
 def parse_arguments():
@@ -221,44 +222,170 @@ def extract_dataset_features(dataset, config, dataset_name="dataset"):
     return features_array, labels_array
 
 
-def train_model(train_features, train_labels, config, val_features=None, val_labels=None):
+def train_model(train_features, train_labels, config, val_features=None, val_labels=None, target_features=None):
     """
-    训练GMM模型
+    训练模型
+    支持自动编码器和GMM模型
     """
     print("开始训练模型...")
     
-    # 检查是否需要寻找最佳组件数量
-    if config.get('model.auto_find_components', True):
-        print("正在寻找最佳组件数量...")
-        min_components = config.get('model.min_components', 1)
-        max_components = config.get('model.max_components', 10)
-        cv_folds = config.get('model.cv_folds', 5)
+    # 获取模型类型
+    model_type = config.get('model.type', 'autoencoder')
+    
+    if model_type == 'autoencoder':
+        print("使用自动编码器模型进行无监督异常检测")
         
-        optimal_components, best_score, _ = find_optimal_components(
-            train_features, train_labels,
-            min_components=min_components,
-            max_components=max_components,
-            cv=cv_folds
+        # 只选择正常数据进行训练（标签为0的样本）
+        if train_labels is not None:
+            normal_indices = train_labels == 0
+            if np.sum(normal_indices) > 0:
+                train_features = train_features[normal_indices]
+                print(f"使用 {np.sum(normal_indices)} 个正常样本进行训练")
+            else:
+                print("警告: 没有正常样本用于训练")
+        
+        # 创建自动编码器模型
+        input_dim = train_features.shape[1]
+        model = AudioAutoencoder(
+            input_dim=input_dim,
+            hidden_dims=config.get('model.autoencoder.hidden_dims', [64, 32, 64]),
+            dropout=config.get('model.autoencoder.dropout', 0.3)
         )
-        print(f"最佳组件数量: {optimal_components}")
-    else:
-        optimal_components = config.get('model.n_components', 5)
+        
+        # 准备验证数据（只使用正常样本）
+        val_normal_features = None
+        if val_features is not None and val_labels is not None:
+            val_normal_indices = val_labels == 0
+            if np.sum(val_normal_indices) > 0:
+                val_normal_features = val_features[val_normal_indices]
+                print(f"使用 {np.sum(val_normal_indices)} 个正常样本进行验证")
+        
+        # 检查是否使用MMD领域适应
+        use_mmd_adaptation = config.get('model.use_mmd_adaptation', False)
+        
+        if use_mmd_adaptation and target_features is not None:
+            print("使用MMD领域适应进行训练")
+            # 创建MMD适应训练器
+            mmd_trainer = MMDAdaptationTrainer(
+                model=model,
+                lambda_mmd=config.get('model.mmd_lambda', 0.1),
+                kernel_type=config.get('model.mmd_kernel', 'rbf'),
+                learning_rate=config.get('model.learning_rate', 0.001)
+            )
+            
+            # 训练模型
+            mmd_trainer.train(
+                source_features=train_features,
+                target_features=target_features,
+                val_source_features=val_normal_features,
+                epochs=config.get('model.epochs', 100),
+                batch_size=config.get('model.batch_size', 32),
+                patience=config.get('model.patience', 10)
+            )
+        else:
+            # 常规训练
+            model.train(
+                train_features=train_features,
+                val_features=val_normal_features,
+                epochs=config.get('model.epochs', 100),
+                batch_size=config.get('model.batch_size', 32),
+                learning_rate=config.get('model.learning_rate', 0.001),
+                patience=config.get('model.patience', 10)
+            )
+        
+        # 设置重构误差阈值
+        if val_normal_features is not None:
+            val_errors = model.calculate_reconstruction_error(val_normal_features)
+            model.set_threshold(val_errors, percentile=config.get('model.threshold_percentile', 95))
+        
+        print("自动编码器模型训练完成")
+        return model, None
     
-    # 训练模型
-    model = train_gmm_model(
-        train_features, train_labels,
-        n_components=optimal_components,
-        covariance_type=config.get('model.covariance_type', 'diag')
-    )
-    
-    print("模型训练完成")
-    return model, optimal_components
+    else:  # GMM模型
+        print("使用GMM模型进行训练")
+        
+        # 检查是否需要寻找最佳组件数量
+        if config.get('model.auto_find_components', True):
+            print("正在寻找最佳组件数量...")
+            min_components = config.get('model.min_components', 1)
+            max_components = config.get('model.max_components', 10)
+            cv_folds = config.get('model.cv_folds', 5)
+            
+            optimal_components, best_score, _ = find_optimal_components(
+                train_features, train_labels,
+                min_components=min_components,
+                max_components=max_components,
+                cv=cv_folds
+            )
+            print(f"最佳组件数量: {optimal_components}")
+        else:
+            optimal_components = config.get('model.n_components', 5)
+        
+        # 训练模型
+        model = train_gmm_model(
+            train_features, train_labels,
+            n_components=optimal_components,
+            covariance_type=config.get('model.covariance_type', 'diag')
+        )
+        
+        print("GMM模型训练完成")
+        return model, optimal_components
 
 
 def determine_threshold(model, val_features, val_labels, config, threshold=None):
     """
     确定最佳分类阈值
+    支持自动编码器和GMM模型
     """
+    # 检查是否为自动编码器模型
+    if hasattr(model, 'calculate_reconstruction_error'):
+        print("自动编码器模型: 使用重构误差阈值")
+        
+        if threshold is not None:
+            print(f"使用指定的阈值: {threshold}")
+            model.threshold = threshold
+            return threshold
+        
+        # 如果模型已经设置了阈值，直接返回
+        if hasattr(model, 'threshold') and model.threshold is not None:
+            print(f"使用模型已设置的阈值: {model.threshold}")
+            return model.threshold
+        
+        if val_features is None or val_labels is None:
+            # 如果有验证集但没有标签，使用验证集的正常样本重构误差设置阈值
+            if val_features is not None:
+                print("使用验证集的重构误差设置阈值（假设全部为正常样本）")
+                errors = model.calculate_reconstruction_error(val_features)
+                percentile = config.get('model.threshold_percentile', 95)
+                optimal_threshold = np.percentile(errors, percentile)
+                model.threshold = optimal_threshold
+                print(f"基于验证集设置阈值 (第{percentile}百分位): {optimal_threshold}")
+                return optimal_threshold
+            else:
+                print("没有验证集，使用默认阈值: 1.0")
+                return 1.0
+        
+        # 使用正常样本的重构误差设置阈值
+        normal_indices = val_labels == 0
+        if np.sum(normal_indices) > 0:
+            normal_features = val_features[normal_indices]
+            print(f"使用 {np.sum(normal_indices)} 个正常样本设置阈值")
+            errors = model.calculate_reconstruction_error(normal_features)
+            percentile = config.get('model.threshold_percentile', 95)
+            optimal_threshold = np.percentile(errors, percentile)
+            model.threshold = optimal_threshold
+            print(f"基于正常样本设置阈值 (第{percentile}百分位): {optimal_threshold}")
+            return optimal_threshold
+        else:
+            print("验证集中没有正常样本，使用所有样本设置阈值")
+            errors = model.calculate_reconstruction_error(val_features)
+            percentile = config.get('model.threshold_percentile', 95)
+            optimal_threshold = np.percentile(errors, percentile)
+            model.threshold = optimal_threshold
+            print(f"基于所有样本设置阈值 (第{percentile}百分位): {optimal_threshold}")
+            return optimal_threshold
+    
+    # GMM模型阈值设置
     if threshold is not None:
         print(f"使用指定的阈值: {threshold}")
         return threshold
@@ -282,17 +409,59 @@ def determine_threshold(model, val_features, val_labels, config, threshold=None)
 def evaluate_final_model(model, test_features, test_labels, threshold, config):
     """
     评估最终模型性能
+    支持自动编码器和GMM模型
     """
     print("\n正在评估模型性能...")
     
     # 使用评估函数
     output_dir = config.get('paths.plots_dir', None) if config.get('evaluation.plot_results', True) else None
-    evaluator, metrics = evaluate_model(
-        model, test_features, test_labels, 
-        threshold=threshold,
-        target_names=['normal', 'anomaly'],
-        output_dir=output_dir
-    )
+    
+    # 针对自动编码器模型的特殊处理
+    if hasattr(model, 'calculate_reconstruction_error'):
+        print("使用自动编码器模型评估")
+        
+        # 设置阈值
+        if threshold is not None:
+            model.threshold = threshold
+        
+        # 计算所有样本的重构误差
+        all_errors = model.calculate_reconstruction_error(test_features)
+        
+        # 预测结果
+        predictions = (all_errors > model.threshold).astype(int)
+        
+        # 使用评估函数
+        evaluator, metrics = evaluate_model(
+            model, test_features, test_labels, 
+            threshold=threshold,
+            target_names=['normal', 'anomaly'],
+            output_dir=output_dir,
+            # 传递重构误差作为分数
+            scores=all_errors
+        )
+        
+        # 额外打印重构误差统计信息
+        print("\n重构误差统计:")
+        if test_labels is not None:
+            normal_indices = test_labels == 0
+            anomaly_indices = test_labels == 1
+            if np.sum(normal_indices) > 0:
+                normal_errors = all_errors[normal_indices]
+                print(f"正常样本平均误差: {np.mean(normal_errors):.4f}")
+                print(f"正常样本误差标准差: {np.std(normal_errors):.4f}")
+            if np.sum(anomaly_indices) > 0:
+                anomaly_errors = all_errors[anomaly_indices]
+                print(f"异常样本平均误差: {np.mean(anomaly_errors):.4f}")
+                print(f"异常样本误差标准差: {np.std(anomaly_errors):.4f}")
+        print(f"使用的阈值: {model.threshold:.4f}")
+    else:
+        # GMM模型评估
+        evaluator, metrics = evaluate_model(
+            model, test_features, test_labels, 
+            threshold=threshold,
+            target_names=['normal', 'anomaly'],
+            output_dir=output_dir
+        )
     
     # 打印评估指标
     print("\n评估指标:")
@@ -310,23 +479,40 @@ def evaluate_final_model(model, test_features, test_labels, threshold, config):
 def save_results(model, threshold, optimal_components, config):
     """
     保存模型和结果
+    支持自动编码器和GMM模型
     """
     model_dir = config.get('paths.model_dir')
     if not os.path.exists(model_dir):
         os.makedirs(model_dir)
     
-    # 保存模型
-    model_path = os.path.join(model_dir, 'gmm_model.pkl')
-    model.save(model_path)
-    print(f"模型已保存至: {model_path}")
-    
-    # 保存配置信息
-    import json
-    results = {
-        'threshold': threshold,
-        'optimal_components': optimal_components,
-        'config': dict(config.config)
-    }
+    # 根据模型类型保存
+    if hasattr(model, 'calculate_reconstruction_error'):
+        # 自动编码器模型
+        model_path = os.path.join(model_dir, 'autoencoder_model.pth')
+        model.save(model_path)
+        print(f"自动编码器模型已保存至: {model_path}")
+        
+        # 保存配置信息
+        import json
+        results = {
+            'threshold': threshold,
+            'model_type': 'autoencoder',
+            'config': dict(config.config)
+        }
+    else:
+        # GMM模型
+        model_path = os.path.join(model_dir, 'gmm_model.pkl')
+        model.save(model_path)
+        print(f"GMM模型已保存至: {model_path}")
+        
+        # 保存配置信息
+        import json
+        results = {
+            'threshold': threshold,
+            'optimal_components': optimal_components,
+            'model_type': 'gmm',
+            'config': dict(config.config)
+        }
     
     results_path = os.path.join(model_dir, 'training_results.json')
     with open(results_path, 'w', encoding='utf-8') as f:
@@ -338,6 +524,7 @@ def save_results(model, threshold, optimal_components, config):
 def predict_audio_file(audio_path, model, config, threshold):
     """
     预测单个音频文件
+    支持自动编码器和GMM模型
     """
     print(f"预测音频文件: {audio_path}")
     
@@ -345,45 +532,77 @@ def predict_audio_file(audio_path, model, config, threshold):
     audio, sr = load_audio(audio_path, sr=config.get('data.sample_rate'))
     
     # 提取特征
-    features = extract_all_features(
+    features, _ = extract_all_features(
         audio, 
         sr=sr,
-        n_mfcc=config.get('features.n_mfcc', 13),
-        n_fft=config.get('features.n_fft', 2048),
-        hop_length=config.get('features.hop_length', 512),
-        win_length=config.get('features.win_length', None),
-        n_mels=config.get('features.n_mels', 128)
+        feature_config={
+            'mfcc': {'n_mfcc': config.get('features.n_mfcc', 13)},
+            'melspectrogram': {'n_mels': config.get('features.n_mels', 128)},
+            'chroma': {},
+            'spectral_contrast': {},
+            'zero_crossing_rate': {},
+            'rms_energy': {}
+        }
     )
     
-    # 预测
-    detector = ThresholdDetector(model)
-    prediction, score = detector.apply_threshold([features], threshold)
-    
-    # 获取更详细的概率信息
-    if hasattr(model, 'get_class_likelihood'):
-        normal_prob = model.get_class_likelihood([features], 0)[0]
-        anomaly_prob = model.get_class_likelihood([features], 1)[0]
+    # 根据模型类型进行预测
+    if hasattr(model, 'calculate_reconstruction_error'):
+        # 自动编码器模型预测
+        print("使用自动编码器模型进行预测")
+        
+        # 设置阈值
+        if threshold is not None:
+            model.threshold = threshold
+        
+        # 计算重构误差
+        error = model.calculate_reconstruction_error(features.reshape(1, -1))[0]
+        
+        # 判断是否异常
+        prediction = 1 if error > model.threshold else 0
+        
+        # 显示结果
+        result = '异常' if prediction == 1 else '正常'
+        print(f"\n预测结果: {result}")
+        print(f"重构误差: {error:.4f}")
+        print(f"使用阈值: {model.threshold:.4f}")
+        
+        return {
+            'prediction': result,
+            'prediction_code': prediction,
+            'reconstruction_error': error,
+            'threshold': model.threshold
+        }
     else:
-        normal_prob, anomaly_prob = None, None
-    
-    # 显示结果
-    result = '异常' if prediction[0] == 1 else '正常'
-    print(f"\n预测结果: {result}")
-    print(f"分类分数: {score[0]:.4f}")
-    print(f"使用阈值: {threshold:.4f}")
-    
-    if normal_prob is not None and anomaly_prob is not None:
-        print(f"正常类别概率: {normal_prob:.4f}")
-        print(f"异常类别概率: {anomaly_prob:.4f}")
-    
-    return {
-        'prediction': result,
-        'prediction_code': prediction[0],
-        'score': score[0],
-        'threshold': threshold,
-        'normal_probability': normal_prob,
-        'anomaly_probability': anomaly_prob
-    }
+        # GMM模型预测
+        # 预测
+        detector = ThresholdDetector(model)
+        prediction, score = detector.apply_threshold([features], threshold)
+        
+        # 获取更详细的概率信息
+        if hasattr(model, 'get_class_likelihood'):
+            normal_prob = model.get_class_likelihood([features], 0)[0]
+            anomaly_prob = model.get_class_likelihood([features], 1)[0]
+        else:
+            normal_prob, anomaly_prob = None, None
+        
+        # 显示结果
+        result = '异常' if prediction[0] == 1 else '正常'
+        print(f"\n预测结果: {result}")
+        print(f"分类分数: {score[0]:.4f}")
+        print(f"使用阈值: {threshold:.4f}")
+        
+        if normal_prob is not None and anomaly_prob is not None:
+            print(f"正常类别概率: {normal_prob:.4f}")
+            print(f"异常类别概率: {anomaly_prob:.4f}")
+        
+        return {
+            'prediction': result,
+            'prediction_code': prediction[0],
+            'score': score[0],
+            'threshold': threshold,
+            'normal_probability': normal_prob,
+            'anomaly_probability': anomaly_prob
+        }
 
 
 def train_mode(config, args):
@@ -398,7 +617,7 @@ def train_mode(config, args):
     val_features, val_labels = extract_dataset_features(val_data, config, dataset_name="val")
     test_features, test_labels = extract_dataset_features(test_data, config, dataset_name="test")
     
-    # 训练模型
+    # 训练模型（只使用正常数据，autoencoder模型会在内部筛选）
     model, optimal_components = train_model(
         train_features, train_labels, config,
         val_features=val_features, val_labels=val_labels
@@ -636,10 +855,23 @@ def domain_shift_mode(config, args):
         print(f"应用领域适应时出错: {e}")
         print("继续使用原始特征")
     
-    # 在源域训练模型
+    # 在源域训练模型（只使用正常数据）
     print("\n在源域训练模型...")
+    
+    # 准备目标域正常数据（用于MMD领域适应）
+    target_normal_features = None
+    if len(target_train_features) > 0 and len(target_train_labels) > 0:
+        target_normal_indices = target_train_labels == 0
+        if np.sum(target_normal_indices) > 0:
+            target_normal_features = target_train_features[target_normal_indices]
+            print(f"目标域正常样本数量: {np.sum(target_normal_indices)}")
+    
+    # 训练模型
     model, optimal_components = train_model(
-        adapted_source_train_features, source_train_labels, config
+        adapted_source_train_features, source_train_labels, config,
+        val_features=adapted_source_test_features,
+        val_labels=source_test_labels,
+        target_features=target_normal_features
     )
     
     # 确定阈值（使用源域验证集或测试集）
@@ -710,6 +942,27 @@ def domain_shift_mode(config, args):
     
     # 保存配置和结果
     import json
+    
+    # 辅助函数：将numpy对象转换为可JSON序列化的类型
+    def convert_numpy_to_json_serializable(obj):
+        import numpy as np
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.bool_):
+            return bool(obj)
+        elif isinstance(obj, dict):
+            return {key: convert_numpy_to_json_serializable(value) for key, value in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_numpy_to_json_serializable(item) for item in obj]
+        elif isinstance(obj, tuple):
+            return tuple(convert_numpy_to_json_serializable(item) for item in obj)
+        else:
+            return obj
+    
     results = {
         'source_threshold': source_threshold,
         'calibrated_threshold': calibrated_threshold,
@@ -732,8 +985,12 @@ def domain_shift_mode(config, args):
     }
     
     results_path = os.path.join(model_dir, f'domain_shift_results_{adaptation_method}.json')
+    
+    # 转换结果字典中的numpy对象为可JSON序列化的类型
+    serializable_results = convert_numpy_to_json_serializable(results)
+    
     with open(results_path, 'w', encoding='utf-8') as f:
-        json.dump(results, f, indent=2, ensure_ascii=False)
+        json.dump(serializable_results, f, indent=2, ensure_ascii=False)
     
     print(f"领域偏移训练结果已保存至: {results_path}")
     
