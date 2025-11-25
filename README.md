@@ -109,6 +109,11 @@ python src/realtime/realtime_detection.py --model models/saved_models_optimized/
   - 基于F1分数选择最佳模型
   - 保存模型参数和评估指标
 
+ **快速链接：**
+- 后端 API: http://localhost:5001/api/status
+- 前端界面: 直接打开 `web_interface/frontend/index.html`
+
+
 ## 性能优化
 
 系统提供了多种优化方案来解决常见问题，特别是假阳性（正常样本被误判为异常）问题。详细优化指南请参考：`src/docs/MODEL_OPTIMIZATION_GUIDE.md`
