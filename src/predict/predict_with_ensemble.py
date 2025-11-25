@@ -205,6 +205,10 @@ def compute_all_scores(features, base_model_data):
     if 'scaler' in base_model_data:
         features = base_model_data['scaler'].transform(features)
 
+    # Variance Selector (新增)
+    if 'var_selector' in base_model_data:
+        features = base_model_data['var_selector'].transform(features)
+
     # Selector
     if 'selector' in base_model_data:
         features = base_model_data['selector'].transform(features)
@@ -237,14 +241,42 @@ def predict_with_ensemble(scores_dict, ensemble_data):
     """使用集成模型预测"""
     # 构建特征向量
     score_cols = ensemble_data['score_columns']
-    X = np.array([scores_dict[col] for col in score_cols]).reshape(1, -1)
-
-    # 预测
-    model = ensemble_data['model']
-    prediction = model.predict(X)[0]
-    proba = model.predict_proba(X)[0]
-
-    return prediction, proba
+    
+    # 检查是否是加权平均模型
+    if ensemble_data['model_type'] == 'weighted_average':
+        # 加权平均预测
+        weights = ensemble_data['weights']
+        threshold = ensemble_data['threshold']
+        
+        # 计算加权分数
+        weighted_score = 0.0
+        for col in score_cols:
+            if col in scores_dict and col in weights:
+                weighted_score += scores_dict[col] * weights[col]
+        
+        # 基于阈值进行预测
+        prediction = 1 if weighted_score > threshold else 0
+        
+        # 计算置信度（基于距离阈值的远近）
+        distance = abs(weighted_score - threshold)
+        max_distance = max(abs(threshold), abs(1.0 - threshold))
+        confidence = min(distance / max_distance, 1.0)
+        
+        # 构建概率数组
+        if prediction == 1:
+            proba = np.array([1 - confidence, confidence])
+        else:
+            proba = np.array([confidence, 1 - confidence])
+            
+        return prediction, proba
+    else:
+        # 传统机器学习模型预测
+        X = np.array([scores_dict[col] for col in score_cols]).reshape(1, -1)
+        model = ensemble_data['model']
+        prediction = model.predict(X)[0]
+        proba = model.predict_proba(X)[0]
+        
+        return prediction, proba
 
 
 def predict_audio_file(audio_path, base_model_data, ensemble_data, use_deep_features=True):

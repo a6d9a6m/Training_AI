@@ -584,7 +584,9 @@ def main():
 
     # 3. 标准化
     print("\n[3/9] 特征标准化...")
-    scaler = RobustScaler()
+    # 使用PowerTransformer处理偏态分布，增加特征鲁棒性
+    from sklearn.preprocessing import PowerTransformer
+    scaler = PowerTransformer(method='yeo-johnson', standardize=True)
     train_features_scaled = scaler.fit_transform(train_features)
     val_features_scaled = scaler.transform(val_features)
     test_features_scaled = scaler.transform(test_features)
@@ -595,7 +597,18 @@ def main():
     temp_X = np.vstack([train_features_scaled, test_features_scaled[len(normal_test):len(normal_test)+n_anomaly_for_selection]])
     temp_y = np.array([0] * len(train_features_scaled) + [1] * n_anomaly_for_selection)
 
-    k_features = min(args.k_features, train_features_scaled.shape[1])
+    # 方差阈值预筛选，去除低方差特征
+    from sklearn.feature_selection import VarianceThreshold
+    var_selector = VarianceThreshold(threshold=0.1)  # 去除低方差特征
+    train_features_scaled = var_selector.fit_transform(train_features_scaled)
+    val_features_scaled = var_selector.transform(val_features_scaled)
+    test_features_scaled = var_selector.transform(test_features_scaled)
+    
+    # 更新temp_X以匹配方差筛选后的特征
+    temp_X = np.vstack([train_features_scaled, test_features_scaled[len(normal_test):len(normal_test)+n_anomaly_for_selection]])
+    
+    # 减少特征数量以防止过拟合
+    k_features = min(40, train_features_scaled.shape[1])  # 减少到40个特征
     selector = SelectKBest(f_classif, k=k_features)
     selector.fit(temp_X, temp_y)
 
@@ -797,6 +810,7 @@ def main():
     model_data = {
         'gmm': gmm,
         'scaler': scaler,
+        'var_selector': var_selector,  # 添加方差选择器
         'selector': selector,
         'separation_transformer': separation_transformer,
         'separation_method': args.separation_method,

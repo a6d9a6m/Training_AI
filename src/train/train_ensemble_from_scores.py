@@ -152,6 +152,68 @@ def train_ensemble_models(df, score_cols):
     print(f"  Precision: {results['simple_average']['precision']:.4f}")
     print(f"  Recall: {results['simple_average']['recall']:.4f}")
 
+    # 5. 加权平均（基于假阳性率）
+    print("\n[5] 加权平均（基于假阳性率）...")
+    
+    # 分析每个模型的假阳性率
+    weights = {}
+    for col in score_cols:
+        scores = df[col].values
+
+        # 找最优阈值
+        thresholds = np.linspace(scores.min(), scores.max(), 100)
+        best_fpr = 1.0
+
+        for thresh in thresholds:
+            preds = (scores > thresh).astype(int)
+            tn, fp, fn, tp = confusion_matrix(y, preds).ravel()
+            fpr = fp / (fp + tn) if (fp + tn) > 0 else 0  # 假阳性率
+
+            if fpr < best_fpr:
+                best_fpr = fpr
+
+        # 假阳性率越低，权重越高
+        weights[col] = 1.0 / (best_fpr + 0.01)
+
+    # 归一化权重
+    total_weight = sum(weights.values())
+    weights = {k: v/total_weight for k, v in weights.items()}
+
+    print("  模型权重（基于假阳性率）:")
+    for col, w in weights.items():
+        print(f"    {col}: {w:.3f}")
+
+    # 计算加权平均分数
+    weighted_scores = np.zeros(len(df))
+    for col, weight in weights.items():
+        weighted_scores += df[col].values * weight
+
+    # 找最优阈值
+    fpr, tpr, thresholds = roc_curve(y, weighted_scores)
+    f1_scores = []
+    for thresh in thresholds:
+        preds = (weighted_scores > thresh).astype(int)
+        f1_scores.append(f1_score(y, preds))
+
+    best_idx = np.argmax(f1_scores)
+    best_thresh = thresholds[best_idx]
+    preds_weighted = (weighted_scores > best_thresh).astype(int)
+
+    results['weighted_average'] = {
+        'f1': f1_score(y, preds_weighted),
+        'precision': precision_score(y, preds_weighted),
+        'recall': recall_score(y, preds_weighted),
+        'accuracy': accuracy_score(y, preds_weighted),
+        'auc': roc_auc_score(y, weighted_scores),
+        'threshold': float(best_thresh),
+        'weights': weights
+    }
+
+    print(f"  最优阈值: {best_thresh:.4f}")
+    print(f"  F1: {results['weighted_average']['f1']:.4f}")
+    print(f"  Precision: {results['weighted_average']['precision']:.4f}")
+    print(f"  Recall: {results['weighted_average']['recall']:.4f}")
+
     return models, results
 
 
@@ -202,12 +264,22 @@ def save_best_model(models, results, score_cols, output_dir):
     # 保存模型
     os.makedirs(output_dir, exist_ok=True)
 
-    model_data = {
-        'model': best_model,
-        'model_type': best_model_name,
-        'score_columns': score_cols,
-        'metrics': best_result
-    }
+    # 特殊处理加权平均模型
+    if best_model_name == 'weighted_average':
+        model_data = {
+            'model_type': best_model_name,
+            'score_columns': score_cols,
+            'metrics': best_result,
+            'weights': best_result['weights'],
+            'threshold': best_result['threshold']
+        }
+    else:
+        model_data = {
+            'model': best_model,
+            'model_type': best_model_name,
+            'score_columns': score_cols,
+            'metrics': best_result
+        }
 
     model_path = os.path.join(output_dir, 'ensemble_model.pkl')
     with open(model_path, 'wb') as f:
