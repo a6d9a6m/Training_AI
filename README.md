@@ -1,234 +1,243 @@
 # 声音异常检测系统
 
-一个基于机器学习的声音异常检测系统，支持监督学习和无监督异常检测两种模式。
+一个基于机器学习的声音异常检测系统，使用增强版GMM模型和集成学习方法，特别针对工业设备异常声音检测场景优化。
+
+## 核心组件
+
+当前系统主要使用两个核心训练脚本：
+
+1. **train_gmm_with_score_export.py** - 增强版GMM异常检测模型，支持多种特征提取和分数导出
+2. **train_ensemble_from_scores.py** - 集成模型训练器，融合多种异常检测算法
 
 ## 快速开始
 
 ### 安装依赖
 
 ```bash
-pip install numpy scipy librosa scikit-learn torch matplotlib seaborn sounddevice
+pip install numpy scipy librosa scikit-learn matplotlib seaborn pandas sounddevice
 ```
 
-### 训练模型
+### 数据准备
 
-**方式1：监督学习**（有标签的正常和异常样本）
+系统需要两类数据：
+- 正常样本：用于训练模型
+- 异常样本：用于测试和校准
 
-```bash
-python train_supervised.py \
-    --normal_dir data/normal \
-    --anomaly_dir data/anomaly
+数据目录结构：
+```
+data/
+├── normal/          # 正常样本（训练用）
+└── anomaly/         # 异常样本（测试用）
 ```
 
-**方式2：异常检测**（只有正常样本）
+### 训练流程
 
-```bash
-python train_anomaly_detection.py \
-    --normal_train_dir data/normal_train
+#### 第一步：训练基础GMM模型并导出分数
+
+```powershell
+# PowerShell命令
+python src/train/train_gmm_with_score_export.py `
+    --normal_train_dir data/normal `
+    --anomaly_test_dir data/anomaly `
+    --use_deep_features `
+    --use_ensemble `
+    --use_augmentation `
+    --output_dir models/saved_models_optimized
 ```
+
+此命令将：
+- 提取深度特征和增强特征
+- 应用数据增强提高模型鲁棒性
+- 训练GMM模型并导出多种异常检测分数
+- 保存模型和分数到指定目录
+
+#### 第二步：训练集成模型
+
+```powershell
+# PowerShell命令
+python src/train/train_ensemble_from_scores.py `
+    --scores_csv models/saved_models_optimized/sample_scores.csv `
+    --output_dir models/saved_models_optimized
+```
+
+此命令将：
+- 读取第一步导出的分数
+- 训练多种集成模型（随机森林、逻辑回归、SVM）
+- 选择最佳模型并保存
 
 ### 实时检测
 
 ```bash
-python realtime_detection.py --model models/saved_models/supervised_gmm_model.pkl
+python src/realtime/realtime_detection.py --model models/saved_models_optimized/ensemble_model.pkl
 ```
 
-## 两种训练模式
+## 模型特性
 
-### 1. 监督学习模式
+### 增强版GMM模型 (train_gmm_with_score_export.py)
 
-**适用场景**: 有大量标注好的正常和异常样本
+- **多种特征提取**：
+  - 增强特征集：MFCC、色度、频谱特征、节奏特征等
+  - 深度特征：基于梅尔频谱的深度特征提取
+  
+- **数据增强**：
+  - 时间拉伸（6种速率）
+  - 音调偏移（6种步长）
+  - 噪声添加（3种强度）
+  - 音量变化（4种增益）
 
-**数据组织**:
-```
-data/
-├── normal/      # 正常样本
-└── anomaly/     # 异常样本
-```
+- **多种分离方法**：
+  - Fisher线性判别分析（LDA）
+  - 核方法（RBF、多项式）
+  - 对比度增强
+  - 监督特征变换
 
-**模型**: GMM（高斯混合模型）- 为每个类别训练独立的GMM
+- **多算法分数导出**：
+  - GMM分数
+  - IsolationForest分数
+  - OneClassSVM分数
+  - 集成分数
 
-**使用**:
-```bash
-python train_supervised.py --normal_dir data/normal --anomaly_dir data/anomaly
-```
+### 集成模型 (train_ensemble_from_scores.py)
 
-### 2. 异常检测模式
+- **多种集成算法**：
+  - 随机森林
+  - 逻辑回归
+  - SVM（RBF核）
+  - 简单平均（基线）
 
-**适用场景**: 只有正常样本，异常样本难获取或未知
+- **自动模型选择**：
+  - 基于F1分数选择最佳模型
+  - 保存模型参数和评估指标
 
-**数据组织**:
-```
-data/
-├── normal_train/    # 纯净正常样本（训练用）
-└── mixed_test/      # 混合样本（测试用，可选）
-    ├── normal/
-    └── anomaly/
-```
+## 性能优化
 
-**模型**: 自动编码器 - 只在正常样本上训练，学习正常模式
+系统提供了多种优化方案来解决常见问题，特别是假阳性（正常样本被误判为异常）问题。详细优化指南请参考：`src/docs/MODEL_OPTIMIZATION_GUIDE.md`
 
-**原理**: 重构误差大的样本判定为异常
+### 主要优化方向
 
-**使用**:
-```bash
-python train_anomaly_detection.py --normal_train_dir data/normal_train --mixed_test_dir data/mixed_test
-```
+1. **调整模型参数**：
+   - 降低IsolationForest的敏感度
+   - 调整OneClassSVM参数
+   - 增加GMM组件数
 
-## 实时检测
+2. **增强训练数据多样性**：
+   - 增加数据增强强度
+   - 使用更多训练数据
 
-系统支持实时音频流异常检测：
+3. **调整阈值策略**：
+   - 使用更保守的阈值
+   - 集成模型使用软投票
 
-```bash
-# 命令行版本
-python realtime_detection.py --model models/saved_models/xxx_model.pkl
-
-# 可视化版本（实时显示波形和异常状态）
-python realtime_detection_visual.py --model models/saved_models/xxx_model.pkl
-
-# 从文件模拟流（测试用）
-python realtime_detection.py --mode file --audio_file test.wav --model models/saved_models/xxx_model.pkl
-```
-
-**实时检测特性**:
-- ✅ 麦克风实时输入
-- ✅ 边播放边检测，延迟约100-200ms
-- ✅ 连续异常判定，减少误报
-- ✅ 可视化界面（波形、异常分数曲线、状态指示器）
-- ✅ 自定义警告回调
+4. **特征工程优化**：
+   - 增加特征鲁棒性
+   - 减少过拟合的特征选择
 
 ## 项目结构
 
 ```
 Project/
-├── train_supervised.py           # 监督学习训练脚本
-├── train_anomaly_detection.py    # 异常检测训练脚本
-├── realtime_detection.py          # 实时检测（命令行版）
-├── realtime_detection_visual.py   # 实时检测（可视化版）
-├── features/                      # 特征提取
-│   └── extract_features.py
-├── models/                        # 模型实现
-│   ├── gmm_model.py              # GMM模型
-│   ├── autoencoder.py            # 自动编码器
-│   └── threshold_detector.py     # 阈值检测
-├── utils/                         # 工具类
-│   ├── simple_data_loader.py     # 简化的数据加载器
-│   ├── evaluator.py              # 模型评估
-│   ├── realtime_classifier.py    # 实时分类器
-│   ├── audio_stream_handler.py   # 音频流处理
-│   └── feature_extractor_wrapper.py  # 特征提取包装
-└── TRAINING_GUIDE.md             # 详细训练指南
+├── src/
+│   ├── train/
+│   │   ├── train_gmm_with_score_export.py    # 增强版GMM训练脚本
+│   │   └── train_ensemble_from_scores.py     # 集成模型训练脚本
+│   ├── predict/
+│   │   └── predict_with_ensemble.py          # 预测脚本
+│   ├── realtime/
+│   │   ├── realtime_detection.py             # 实时检测
+│   │   └── realtime_detection_visual.py      # 可视化实时检测
+│   ├── features/
+│   │   ├── extract_features.py               # 特征提取
+│   │   └── deep_features.py                 # 深度特征
+│   ├── models/
+│   │   ├── gmm_model.py                      # GMM模型
+│   │   └── threshold_detector.py             # 阈值检测
+│   └── docs/
+│       ├── MODEL_OPTIMIZATION_GUIDE.md       # 模型优化指南
+│       └── TRAINING_GUIDE.md                 # 训练指南
+├── data/                                     # 数据目录
+├── models/                                   # 模型保存目录
+└── dev_data/                                 # 开发数据
 ```
-
-## 功能特点
-
-### 核心功能
-- **两种训练模式**: 监督学习 + 异常检测
-- **音频特征提取**: MFCC、梅尔频谱、色度、频谱对比度、过零率、RMS能量等
-- **多种模型**: GMM、自动编码器
-- **完整评估**: 准确率、精确率、召回率、F1分数、混淆矩阵、ROC曲线
-
-### 实时检测
-- **麦克风输入**: 实时捕获并检测音频流
-- **文件模拟**: 从文件模拟实时流（方便测试）
-- **智能警告**: 连续异常帧判定，避免误报
-- **可视化**: 实时波形、异常分数曲线、状态指示
-
-### 其他特性
-- **特征缓存**: 自动缓存提取的特征，提高效率
-- **配置灵活**: 通过命令行参数灵活配置
-- **数值稳定**: 优化的统计特征计算
-
-## 详细文档
-
-- **[训练指南](TRAINING_GUIDE.md)**: 详细的训练说明、参数解释、常见问题
-- **[实时检测指南](REALTIME_DETECTION_GUIDE.md)**: 实时检测的详细使用说明
-- **[架构文档](CLAUDE.md)**: 系统架构说明（供AI助手参考）
 
 ## 使用示例
 
-### 完整流程示例
+### 完整训练流程
 
-```bash
-# 1. 准备数据（监督学习）
-mkdir -p data/normal data/anomaly
-# 将音频文件放入对应目录...
+```powershell
+# 第一步：训练基础GMM模型
+python src/train/train_gmm_with_score_export.py `
+    --normal_train_dir data/normal `
+    --anomaly_test_dir data/anomaly `
+    --use_deep_features `
+    --use_ensemble `
+    --use_augmentation `
+    --separation_method lda `
+    --auto_tune `
+    --output_dir models/saved_models_optimized
 
-# 2. 训练模型
-python train_supervised.py \
-    --normal_dir data/normal \
-    --anomaly_dir data/anomaly \
-    --n_components 8 \
-    --output_dir models/saved_models
+# 第二步：训练集成模型
+python src/train/train_ensemble_from_scores.py `
+    --scores_csv models/saved_models_optimized/sample_scores.csv `
+    --output_dir models/saved_models_optimized
 
-# 3. 实时检测
-python realtime_detection.py \
-    --model models/saved_models/supervised_gmm_model.pkl
-
-# 4. 可视化版本
-python realtime_detection_visual.py \
-    --model models/saved_models/supervised_gmm_model.pkl
+# 第三步：测试模型
+python src/predict/predict_with_ensemble.py `
+    --base_model models/saved_models_optimized/gmm_with_scores.pkl `
+    --ensemble_model models/saved_models_optimized/ensemble_model.pkl `
+    --audio_dir data/test
 ```
 
-### Python API 使用
+### 高级训练选项
 
-```python
-# 加载模型
-from models.gmm_model import GMMModel
-from models.autoencoder import AudioAutoencoder
-
-# GMM模型
-gmm_model = GMMModel.load('models/saved_models/supervised_gmm_model.pkl')
-
-# 自动编码器
-ae_model = AudioAutoencoder.load('models/saved_models/anomaly_detection_model.pth')
-
-# 提取特征并预测
-from features.extract_features import extract_all_features
-features, _ = extract_all_features(audio_data, sr=22050)
-
-# GMM预测
-prediction = gmm_model.predict(features.reshape(1, -1))
-
-# 自动编码器异常检测
-error = ae_model.calculate_reconstruction_error(features.reshape(1, -1))
-is_anomaly = error > ae_model.threshold
+```powershell
+# 使用更多优化选项
+python src/train/train_gmm_with_score_export.py `
+    --normal_train_dir data/normal `
+    --anomaly_test_dir data/anomaly `
+    --use_deep_features `
+    --use_ensemble `
+    --use_augmentation `
+    --separation_method all `
+    --kernel_type rbf `
+    --contrast_alpha 2.0 `
+    --auto_tune `
+    --k_features 60 `
+    --output_dir models/saved_models_optimized
 ```
 
-## 选择哪种模式？
+## 常见问题与解决方案
 
-| 场景 | 推荐模式 | 原因 |
-|------|----------|------|
-| 有大量标注数据 | 监督学习 | 利用标签，效果更好 |
-| 只有正常样本 | 异常检测 | 无需异常样本 |
-| 异常模式未知 | 异常检测 | 更灵活 |
-| 异常模式明确 | 监督学习 | 更精确 |
+### Q: 模型误报率高（正常样本被误判为异常）？
 
-## 性能
+A: 参考 `src/docs/MODEL_OPTIMIZATION_GUIDE.md` 中的优化方案：
 
-- **训练时间**:
-  - 监督学习: 通常几分钟
-  - 异常检测: 10-30分钟（取决于epochs）
-- **实时检测延迟**: 100-200ms
-- **CPU占用**: 单核15-25%
-- **内存占用**: 约100-200MB
+1. 调整IsolationForest的contamination参数从0.1降至0.05
+2. 调整OneClassSVM的nu参数从0.1降至0.05
+3. 增加GMM组件数到12个
+4. 使用更保守的阈值（95%或98%百分位数）
 
-## 常见问题
+### Q: 训练数据需要多少？
 
-**Q: 训练数据需要多少？**
-- 监督学习: 建议每类至少50个样本
-- 异常检测: 建议至少100个正常样本
+A: 建议至少：
+- 正常样本：100个以上
+- 异常样本：20个以上（用于测试和校准）
 
-**Q: 支持的音频格式？**
-- WAV格式（推荐）
-- 采样率: 22050Hz（默认，可调整）
-- 声道: 单声道（自动转换）
+### Q: 如何提高模型性能？
 
-**Q: 如何提高准确率？**
-1. 增加训练样本数量
-2. 调整模型参数（n_components, encoding_dim）
-3. 调整阈值
-4. 确保训练数据质量
+A: 尝试以下方法：
+1. 启用数据增强：`--use_augmentation`
+2. 使用深度特征：`--use_deep_features`
+3. 尝试不同分离方法：`--separation_method all`
+4. 自动调优：`--auto_tune`
+
+## 性能指标
+
+训练完成后，系统会输出以下关键指标：
+
+- **分离质量分析**：Cohen's d指标（>0.8表示易分离）
+- **重叠度分析**：正常和异常样本分数的重叠程度
+- **最优阈值建议**：基于F1分数的阈值
+- **集成模型对比**：不同集成算法的性能对比
 
 ## 许可证
 
