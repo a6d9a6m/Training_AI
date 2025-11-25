@@ -270,6 +270,22 @@ def predict_audio_file(audio_path, base_model_data, ensemble_data, use_deep_feat
     return prediction, proba, scores
 
 
+def extract_true_label_from_filename(filename):
+    """从文件名中提取真实标签
+
+    文件名格式: section_00_source_train_normal_0000_strength_1_ambient.wav
+    或: section_00_source_train_anomaly_0000_strength_1_ambient.wav
+    """
+    filename_lower = filename.lower()
+
+    if '_normal_' in filename_lower:
+        return 0  # normal
+    elif '_anomaly_' in filename_lower:
+        return 1  # anomaly
+    else:
+        return None  # 无法识别
+
+
 def batch_predict(audio_dir, base_model_data, ensemble_data, use_deep_features=True):
     """批量预测目录下的音频"""
     audio_files = glob(os.path.join(audio_dir, "*.wav"))
@@ -298,10 +314,17 @@ def batch_predict(audio_dir, base_model_data, ensemble_data, use_deep_features=T
             # 集成预测
             prediction, proba = predict_with_ensemble(scores, ensemble_data)
 
+            # 提取真实标签
+            true_label = extract_true_label_from_filename(os.path.basename(audio_path))
+            true_label_str = 'normal' if true_label == 0 else 'anomaly' if true_label == 1 else 'unknown'
+
             result = {
                 'file': os.path.basename(audio_path),
+                'true_label': int(true_label) if true_label is not None else -1,
+                'true_label_str': true_label_str,
                 'prediction': int(prediction),
                 'prediction_label': 'anomaly' if prediction == 1 else 'normal',
+                'correct': (prediction == true_label) if true_label is not None else None,
                 'confidence_normal': float(proba[0]),
                 'confidence_anomaly': float(proba[1]),
                 **{k: float(v) for k, v in scores.items()},
@@ -310,8 +333,15 @@ def batch_predict(audio_dir, base_model_data, ensemble_data, use_deep_features=T
 
             results.append(result)
 
-            # 简洁输出
-            print(f"  [{i+1:3d}] {result['prediction_label']:8s} (置信度: {proba[prediction]:.1%}) - {os.path.basename(audio_path)}")
+            # 简洁输出，显示对错
+            correct_marker = ""
+            if true_label is not None:
+                if prediction == true_label:
+                    correct_marker = "✓"
+                else:
+                    correct_marker = "✗ ERROR"
+
+            print(f"  [{i+1:3d}] 真实:{true_label_str:7s} | 预测:{result['prediction_label']:7s} {correct_marker:7s} (置信度: {proba[prediction]:.1%})")
 
         except Exception as e:
             error_msg = str(e)
@@ -325,8 +355,11 @@ def batch_predict(audio_dir, base_model_data, ensemble_data, use_deep_features=T
             # 仍然记录失败的结果
             results.append({
                 'file': os.path.basename(audio_path),
+                'true_label': -1,
+                'true_label_str': 'unknown',
                 'prediction': -1,
                 'prediction_label': 'error',
+                'correct': None,
                 'confidence_normal': 0.0,
                 'confidence_anomaly': 0.0,
                 'status': f'error: {error_msg}'
@@ -359,6 +392,68 @@ def batch_predict(audio_dir, base_model_data, ensemble_data, use_deep_features=T
         if n_anomaly > 0:
             avg_conf_anomaly = np.mean([r['confidence_anomaly'] for r in successful if r['prediction'] == 1])
             print(f"平均置信度 (异常样本): {avg_conf_anomaly:.2%}")
+
+        # ===== 新增：评估指标 =====
+        # 筛选有真实标签的样本
+        labeled_results = [r for r in successful if r['true_label'] != -1]
+
+        if labeled_results:
+            print("\n" + "="*70)
+            print("模型评估指标 (与真实标签对比)")
+            print("="*70)
+
+            # 计算准确率
+            correct_count = sum(1 for r in labeled_results if r['correct'])
+            accuracy = correct_count / len(labeled_results)
+
+            print(f"\n准确率 (Accuracy): {accuracy:.2%} ({correct_count}/{len(labeled_results)})")
+
+            # 混淆矩阵
+            y_true = [r['true_label'] for r in labeled_results]
+            y_pred = [r['prediction'] for r in labeled_results]
+
+            from sklearn.metrics import confusion_matrix, classification_report
+
+            # 混淆矩阵
+            cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+            tn, fp, fn, tp = cm.ravel()
+
+            print(f"\n混淆矩阵:")
+            print(f"                 预测:正常   预测:异常")
+            print(f"  真实:正常      {tn:6d}      {fp:6d}")
+            print(f"  真实:异常      {fn:6d}      {tp:6d}")
+
+            # 计算各项指标
+            if tp + fp > 0:
+                precision = tp / (tp + fp)
+                print(f"\n精确率 (Precision): {precision:.2%}")
+            else:
+                print(f"\n精确率 (Precision): N/A (无异常预测)")
+
+            if tp + fn > 0:
+                recall = tp / (tp + fn)
+                print(f"召回率 (Recall):    {recall:.2%}")
+            else:
+                print(f"召回率 (Recall):    N/A (无真实异常)")
+
+            if tp + fp > 0 and tp + fn > 0:
+                f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+                print(f"F1 分数:            {f1:.2%}")
+
+            # 详细分类报告
+            print(f"\n详细分类报告:")
+            print(classification_report(y_true, y_pred, target_names=['正常', '异常'], digits=4))
+
+            # 错误样本分析
+            wrong_results = [r for r in labeled_results if not r['correct']]
+            if wrong_results:
+                print(f"\n错误分类样本 ({len(wrong_results)} 个):")
+                print("-" * 70)
+                for r in wrong_results[:10]:  # 只显示前10个
+                    print(f"  {r['file'][:50]}")
+                    print(f"    真实: {r['true_label_str']:7s} | 预测: {r['prediction_label']:7s} | 置信度: {r['confidence_anomaly' if r['prediction'] == 1 else 'confidence_normal']:.1%}")
+                if len(wrong_results) > 10:
+                    print(f"  ... 还有 {len(wrong_results) - 10} 个错误样本")
 
     if errors:
         print(f"\n失败的文件:")
