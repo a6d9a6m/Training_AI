@@ -104,7 +104,7 @@ def main():
     print("\n[4/5] 在验证集上确定最佳阈值...")
     optimal_threshold = find_optimal_threshold(
         model, val_features, val_labels,
-        method='f1_score'
+        method='f1'
     )
     print(f"最佳阈值: {optimal_threshold:.4f}")
 

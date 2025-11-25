@@ -1,0 +1,15 @@
+{
+  "model_type": "gmm_enhanced",
+  "n_components": 8,
+  "covariance_type": "full",
+  "n_features": 60,
+  "threshold": -20.622651580868943,
+  "metrics": {
+    "accuracy": 0.5166389351081531,
+    "precision": 0.5508021390374331,
+    "recall": 0.17166666666666666,
+    "f1": 0.2617534942820839,
+    "auc": 0.5406284606866002,
+    "separation": 0.1307387219983875
+  }
+}

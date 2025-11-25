@@ -1,0 +1,34 @@
+{
+  "model_type": "score_based_anomaly",
+  "score_method": "mahalanobis",
+  "denoise": true,
+  "sigma_threshold": 2.0,
+  "normal_range": [
+    12.549353283940363,
+    12.573251416378607
+  ],
+  "threshold": 12.573251416378607,
+  "sample_rate": 22050,
+  "metrics": {
+    "accuracy": 0.7142857142857143,
+    "precision": 0.7142857142857143,
+    "recall": 1.0,
+    "f1": 0.8333333333333334,
+    "auc": 0.51725
+  },
+  "score_statistics": {
+    "train": {
+      "mean": 12.561302350159485,
+      "std": 0.00597453310956114
+    },
+    "test_normal": {
+      "mean": 294.09306692023137,
+      "std": 199.0895868699589
+    },
+    "test_anomaly": {
+      "mean": 278.37126718175926,
+      "std": 121.42287008769028
+    },
+    "separation": -2631.469179292396
+  }
+}

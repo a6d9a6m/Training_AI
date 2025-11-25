@@ -1,0 +1,30 @@
+{
+  "model_type": "gmm_anomaly_detection",
+  "n_components": 5,
+  "threshold": 70.3270620755372,
+  "threshold_percentile": 10.0,
+  "sample_rate": 22050,
+  "n_features": 71,
+  "metrics": {
+    "accuracy": 0.7142857142857143,
+    "precision": 0.7142857142857143,
+    "recall": 1.0,
+    "f1": 0.8333333333333334,
+    "auc": 0.5505
+  },
+  "score_statistics": {
+    "train": {
+      "mean": 177.64033189486295,
+      "std": 85.35731865377932
+    },
+    "test_normal": {
+      "mean": -1770309.3457260407,
+      "std": 3667384.0769409584
+    },
+    "test_anomaly": {
+      "mean": -1173664.076669191,
+      "std": 2053157.0971355734
+    },
+    "separation": -6989.97201958654
+  }
+}

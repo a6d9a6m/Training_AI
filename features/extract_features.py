@@ -1,9 +1,16 @@
 import numpy as np
 import librosa
 import librosa.feature
-import pywt  # 用于小波变换
 from scipy import stats  # 用于更高级的统计特征计算
 import warnings  # 用于抑制警告
+
+# 小波变换（可选依赖）
+try:
+    import pywt
+    PYWT_AVAILABLE = True
+except ImportError:
+    PYWT_AVAILABLE = False
+    print("警告: PyWavelets未安装，小波特征将被跳过。安装: pip install PyWavelets")
 
 
 def extract_mfcc(y, sr, n_mfcc=13, n_fft=2048, hop_length=512, fmin=20, fmax=None, apply_delta=True):
@@ -401,15 +408,19 @@ def extract_zero_crossing_rate(y, hop_length=512, frame_length=2048):
 def extract_wavelet_features(y, wavelet='db4', level=4):
     """
     提取小波特征，提供多尺度时间-频率表示，对领域变化更稳健
-    
+
     参数:
     y: 音频时间序列
     wavelet: 小波基函数名称
     level: 分解级别
-    
+
     返回:
     wavelet_features: 小波特征向量
     """
+    if not PYWT_AVAILABLE:
+        # 如果pywt未安装，返回空数组
+        return np.array([])
+
     try:
         # 执行小波分解
         coeffs = pywt.wavedec(y, wavelet, level=level)

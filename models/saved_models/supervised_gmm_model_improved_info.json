@@ -1,0 +1,19 @@
+{
+  "model_type": "supervised_gmm_improved",
+  "n_components": 4,
+  "threshold": -2535.4651427219587,
+  "sample_rate": 22050,
+  "feature_selection_ratio": 0.8,
+  "n_features_selected": 856,
+  "n_features_original": 1071,
+  "metrics": {
+    "accuracy": 0.525,
+    "precision": 0.5266666666666666,
+    "recall": 0.525,
+    "f1": 0.5174603174603174,
+    "auc": 0.52625
+  },
+  "train_samples": 128,
+  "val_samples": 32,
+  "test_samples": 40
+}

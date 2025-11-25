@@ -281,8 +281,158 @@ def create_autoencoder_model(input_dim=1024, encoding_dim=128):
 def get_autoencoder_loss():
     """
     获取自动编码器的损失函数
-    
+
     返回:
     criterion: 均方误差损失函数
     """
     return nn.MSELoss()
+
+
+class AutoencoderModel:
+    """
+    自动编码器模型包装类 - 提供统一的训练和预测接口
+    """
+
+    def __init__(self, input_dim=1024, encoding_dim=128, dropout_rate=0.3):
+        """
+        初始化自动编码器模型
+
+        参数:
+        input_dim: 输入特征维度
+        encoding_dim: 编码维度
+        dropout_rate: Dropout率
+        """
+        self.model = AudioAutoencoder(input_dim, encoding_dim, dropout_rate)
+        self.threshold = None
+
+    def fit(self, X_train, epochs=100, batch_size=32, validation_data=None, learning_rate=0.001):
+        """
+        训练自动编码器
+
+        参数:
+        X_train: 训练数据 (numpy array)
+        epochs: 训练轮数
+        batch_size: 批次大小
+        validation_data: 验证数据
+        learning_rate: 学习率
+        """
+        # 转换为PyTorch数据集
+        from torch.utils.data import TensorDataset, DataLoader
+
+        X_tensor = torch.tensor(X_train, dtype=torch.float32)
+        y_dummy = torch.zeros(len(X_train))  # 占位标签
+        train_dataset = TensorDataset(X_tensor, y_dummy)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+
+        # 优化器和损失函数
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
+        criterion = nn.MSELoss()
+
+        # 训练
+        print("开始训练自动编码器...")
+        self.model.train_model(train_loader, optimizer, criterion, epochs=epochs, verbose=True)
+
+        # 计算阈值
+        if validation_data is not None:
+            X_val_tensor = torch.tensor(validation_data, dtype=torch.float32)
+            y_val_dummy = torch.zeros(len(validation_data))
+            val_dataset = TensorDataset(X_val_tensor, y_val_dummy)
+            val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+
+            self.model.set_reconstruction_threshold(val_loader, percentile=95)
+            self.threshold = self.model.reconstruction_threshold
+
+    def predict(self, X):
+        """
+        预测重构
+
+        参数:
+        X: 输入数据
+
+        返回:
+        重构后的数据
+        """
+        self.model.eval()
+        X_tensor = torch.tensor(X, dtype=torch.float32).to(self.model.device)
+
+        with torch.no_grad():
+            _, reconstructed = self.model(X_tensor)
+
+        return reconstructed.cpu().numpy()
+
+    def predict_anomaly(self, X, threshold=None):
+        """
+        预测异常
+
+        参数:
+        X: 输入数据
+        threshold: 阈值（如果为None，使用训练时计算的阈值）
+
+        返回:
+        predictions: 预测标签 (0=正常, 1=异常)
+        """
+        if threshold is not None:
+            self.model.reconstruction_threshold = threshold
+            self.threshold = threshold
+
+        X_tensor = torch.tensor(X, dtype=torch.float32)
+        predictions = self.model.predict_anomaly(X_tensor)
+
+        return predictions
+
+    def save(self, path):
+        """
+        保存模型
+
+        参数:
+        path: 保存路径
+        """
+        import os
+        os.makedirs(path, exist_ok=True)
+
+        # 保存模型权重
+        model_file = os.path.join(path, 'model.pth')
+        torch.save(self.model.state_dict(), model_file)
+
+        # 保存配置
+        import pickle
+        config_file = os.path.join(path, 'config.pkl')
+        with open(config_file, 'wb') as f:
+            pickle.dump({
+                'threshold': self.threshold,
+                'input_dim': list(self.model.encoder[0].parameters())[0].shape[1],
+                'encoding_dim': self.model.encoding_dim
+            }, f)
+
+        print(f"模型已保存到: {path}")
+
+    def load(self, path):
+        """
+        加载模型
+
+        参数:
+        path: 模型路径
+        """
+        import pickle
+
+        # 加载配置
+        config_file = os.path.join(path, 'config.pkl')
+        with open(config_file, 'rb') as f:
+            config = pickle.load(f)
+
+        # 重新创建模型
+        self.model = AudioAutoencoder(
+            input_dim=config['input_dim'],
+            encoding_dim=config['encoding_dim']
+        )
+
+        # 加载权重
+        model_file = os.path.join(path, 'model.pth')
+        self.model.load_state_dict(torch.load(model_file))
+        self.model.eval()
+
+        # 恢复阈值
+        self.threshold = config['threshold']
+        self.model.reconstruction_threshold = self.threshold
+
+        print(f"模型已从 {path} 加载")
