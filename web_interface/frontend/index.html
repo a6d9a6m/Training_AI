@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>算法性能对比 - 声音异常检测</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 40px 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            text-align: center;
+            color: white;
+            font-size: 42px;
+            margin-bottom: 50px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .models-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 30px;
+            margin-bottom: 50px;
+        }
+
+        .model-card {
+            background: white;
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+            transition: transform 0.3s, box-shadow 0.3s;
+            position: relative;
+        }
+
+        .model-card:hover {
+            transform: translateY(-10px);
+            box-shadow: 0 15px 40px rgba(0,0,0,0.4);
+        }
+
+        .model-card.winner {
+            border: 3px solid #FFD700;
+        }
+
+        .winner-badge {
+            position: absolute;
+            top: -15px;
+            right: 20px;
+            background: linear-gradient(135deg, #FFD700, #FFA500);
+            color: white;
+            padding: 8px 20px;
+            border-radius: 20px;
+            font-weight: bold;
+            box-shadow: 0 4px 10px rgba(255, 215, 0, 0.5);
+            font-size: 14px;
+        }
+
+        .model-name {
+            font-size: 28px;
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 20px;
+        }
+
+        .metric {
+            margin-bottom: 15px;
+        }
+
+        .metric-label {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 5px;
+        }
+
+        .metric-bar {
+            height: 30px;
+            background: #f0f0f0;
+            border-radius: 15px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .metric-fill {
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+            transition: width 1s ease;
+        }
+
+        .accuracy-bar { background: linear-gradient(90deg, #667eea, #764ba2); }
+        .precision-bar { background: linear-gradient(90deg, #f093fb, #f5576c); }
+        .recall-bar { background: linear-gradient(90deg, #4facfe, #00f2fe); }
+        .f1-bar { background: linear-gradient(90deg, #43e97b, #38f9d7); }
+        .auc-bar { background: linear-gradient(90deg, #fa709a, #fee140); }
+
+        .radar-container {
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+            margin-bottom: 30px;
+        }
+
+        .radar-title {
+            font-size: 28px;
+            color: #333;
+            margin-bottom: 30px;
+            text-align: center;
+        }
+
+        #radarChart {
+            max-width: 600px;
+            margin: 0 auto;
+            display: block;
+        }
+
+        .summary-card {
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+            text-align: center;
+        }
+
+        .summary-title {
+            font-size: 32px;
+            color: #333;
+            margin-bottom: 30px;
+        }
+
+        .summary-text {
+            font-size: 18px;
+            color: #666;
+            line-height: 1.8;
+            margin-bottom: 20px;
+        }
+
+        .highlight {
+            color: #667eea;
+            font-weight: bold;
+            font-size: 24px;
+        }
+
+        .loading {
+            text-align: center;
+            color: white;
+            font-size: 24px;
+            padding: 50px;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .model-card {
+            animation: fadeIn 0.5s ease-out;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎯 算法性能对比</h1>
+
+        <!-- 雷达图 -->
+        <div id="radarContainer" class="radar-container" style="display:none;">
+            <h3 class="radar-title">📊 五维性能雷达图</h3>
+            <canvas id="radarChart" width="500" height="500"></canvas>
+        </div>
+
+        <div id="content" class="loading">加载中...</div>
+    </div>
+
+    <!-- Chart.js库 -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+
+    <script>
+        const API_URL = 'http://localhost:5001/api/training/results';
+
+        async function loadResults() {
+            try {
+                const response = await fetch(API_URL);
+                const data = await response.json();
+
+                if (!data.results || data.results.length === 0) {
+                    document.getElementById('content').innerHTML = '<p class="loading">暂无数据</p>';
+                    return;
+                }
+
+                // 获取ensemble结果
+                const ensembleResult = data.results.find(r => r.model_type === 'ensemble');
+
+                if (!ensembleResult || !ensembleResult.metrics) {
+                    document.getElementById('content').innerHTML = '<p class="loading">未找到集成模型结果</p>';
+                    return;
+                }
+
+                const metrics = ensembleResult.metrics;
+
+                // 提取各算法的性能
+                const models = [];
+
+                if (metrics.random_forest) {
+                    models.push({
+                        name: 'Random Forest',
+                        displayName: '随机森林',
+                        ...metrics.random_forest,
+                        emoji: '🌳'
+                    });
+                }
+
+                if (metrics.logistic_regression) {
+                    models.push({
+                        name: 'Logistic Regression',
+                        displayName: '逻辑回归',
+                        ...metrics.logistic_regression,
+                        emoji: '📈'
+                    });
+                }
+
+                if (metrics.svm) {
+                    models.push({
+                        name: 'SVM',
+                        displayName: '支持向量机',
+                        ...metrics.svm,
+                        emoji: '🎯'
+                    });
+                }
+
+                // 找出最佳模型
+                let bestModel = models[0];
+                models.forEach(model => {
+                    if (model.f1 > bestModel.f1) {
+                        bestModel = model;
+                    }
+                });
+
+                // 渲染结果
+                renderResults(models, bestModel);
+                renderRadarChart(models);
+
+            } catch (error) {
+                document.getElementById('content').innerHTML = `<p class="loading">加载失败: ${error.message}</p>`;
+            }
+        }
+
+        function renderRadarChart(models) {
+            const ctx = document.getElementById('radarChart');
+            document.getElementById('radarContainer').style.display = 'block';
+
+            // 准备雷达图数据
+            const datasets = models.map((model, index) => {
+                const colors = [
+                    { border: 'rgba(76, 175, 80, 1)', bg: 'rgba(76, 175, 80, 0.2)' },  // 绿色 - Random Forest
+                    { border: 'rgba(244, 67, 54, 1)', bg: 'rgba(244, 67, 54, 0.2)' },   // 红色 - Logistic Regression
+                    { border: 'rgba(33, 150, 243, 1)', bg: 'rgba(33, 150, 243, 0.2)' }  // 蓝色 - SVM
+                ];
+
+                return {
+                    label: model.displayName,
+                    data: [
+                        model.accuracy * 100,
+                        model.precision * 100,
+                        model.recall * 100,
+                        model.f1 * 100,
+                        model.auc * 100
+                    ],
+                    borderColor: colors[index].border,
+                    backgroundColor: colors[index].bg,
+                    borderWidth: 3,
+                    pointRadius: 5,
+                    pointHoverRadius: 8
+                };
+            });
+
+            new Chart(ctx, {
+                type: 'radar',
+                data: {
+                    labels: ['准确率', '精确率', '召回率', 'F1分数', 'AUC'],
+                    datasets: datasets
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: true,
+                    scales: {
+                        r: {
+                            beginAtZero: true,
+                            max: 100,
+                            ticks: {
+                                stepSize: 20,
+                                font: {
+                                    size: 14
+                                }
+                            },
+                            pointLabels: {
+                                font: {
+                                    size: 16,
+                                    weight: 'bold'
+                                }
+                            },
+                            grid: {
+                                color: 'rgba(0, 0, 0, 0.1)'
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                            labels: {
+                                font: {
+                                    size: 16
+                                },
+                                padding: 20,
+                                usePointStyle: true,
+                                pointStyle: 'circle'
+                            }
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    return context.dataset.label + ': ' + context.parsed.r.toFixed(1) + '%';
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        function renderResults(models, bestModel) {
+            const modelsHTML = models.map(model => {
+                const isWinner = model.name === bestModel.name;
+
+                return `
+                    <div class="model-card ${isWinner ? 'winner' : ''}">
+                        ${isWinner ? '<div class="winner-badge">🏆 最佳算法</div>' : ''}
+                        <div class="model-name">${model.emoji} ${model.displayName}</div>
+
+                        <div class="metric">
+                            <div class="metric-label">准确率 (Accuracy)</div>
+                            <div class="metric-bar">
+                                <div class="metric-fill accuracy-bar" style="width: ${model.accuracy * 100}%">
+                                    ${(model.accuracy * 100).toFixed(1)}%
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="metric">
+                            <div class="metric-label">精确率 (Precision)</div>
+                            <div class="metric-bar">
+                                <div class="metric-fill precision-bar" style="width: ${model.precision * 100}%">
+                                    ${(model.precision * 100).toFixed(1)}%
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="metric">
+                            <div class="metric-label">召回率 (Recall)</div>
+                            <div class="metric-bar">
+                                <div class="metric-fill recall-bar" style="width: ${model.recall * 100}%">
+                                    ${(model.recall * 100).toFixed(1)}%
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="metric">
+                            <div class="metric-label">F1 分数 (F1 Score)</div>
+                            <div class="metric-bar">
+                                <div class="metric-fill f1-bar" style="width: ${model.f1 * 100}%">
+                                    ${(model.f1 * 100).toFixed(1)}%
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="metric">
+                            <div class="metric-label">AUC</div>
+                            <div class="metric-bar">
+                                <div class="metric-fill auc-bar" style="width: ${model.auc * 100}%">
+                                    ${(model.auc * 100).toFixed(1)}%
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            const summaryHTML = `
+                <div class="summary-card">
+                    <div class="summary-title">📊 总结</div>
+                    <div class="summary-text">
+                        基础模型使用 <strong>GMM（高斯混合模型）</strong> 提取特征<br>
+                        然后使用 ${models.length} 种集成算法进行分类
+                    </div>
+                    <div class="summary-text">
+                        🏆 最佳算法：<span class="highlight">${bestModel.displayName}</span>
+                    </div>
+                    <div class="summary-text">
+                        准确率：<span class="highlight">${(bestModel.accuracy * 100).toFixed(1)}%</span> |
+                        F1分数：<span class="highlight">${(bestModel.f1 * 100).toFixed(1)}%</span>
+                    </div>
+                </div>
+            `;
+
+            document.getElementById('content').innerHTML = `
+                <div class="models-grid">${modelsHTML}</div>
+                ${summaryHTML}
+            `;
+        }
+
+        // 页面加载时自动获取数据
+        loadResults();
+    </script>
+</body>
+</html>
