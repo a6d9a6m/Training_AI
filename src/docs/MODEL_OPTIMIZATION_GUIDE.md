@@ -279,21 +279,19 @@ def train_weighted_ensemble(df, score_cols):
 
 ```bash
 # 修改 train_gmm_with_score_export.py 中的参数后重新训练
-python train_gmm_with_score_export.py \
-    --normal_train_dir dev_data/fan/train \
-    --anomaly_test_dir dev_data/fan/source_test \
-    --use_deep_features \
-    --use_ensemble \
-    --use_augmentation \
+python src/train/train_gmm_with_score_export.py `
+    --normal_train_dir data/normal `
+    --anomaly_test_dir data/anomaly `
+    --use_deep_features `
+    --use_ensemble `
+    --use_augmentation `
     --output_dir models/saved_models_optimized
 ```
 
 ### Step 2: 重新训练集成模型
 
 ```bash
-python train_ensemble_from_scores.py \
-    --scores_csv models/saved_models_optimized/sample_scores.csv \
-    --output_dir models/saved_models_optimized
+python src/train/train_ensemble_from_scores.py --scores_csv models/saved_models_optimized/sample_scores.csv --output_dir models/saved_models_optimized
 ```
 
 ### Step 3: 测试并对比

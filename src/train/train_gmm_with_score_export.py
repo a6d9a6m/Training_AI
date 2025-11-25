@@ -46,31 +46,41 @@ except:
 
 
 def augment_audio(audio, sr):
-    """数据增强"""
+    """增强版数据增强"""
     augmented = [audio]
 
-    try:
-        audio_stretched_fast = librosa.effects.time_stretch(audio, rate=1.1)
-        augmented.append(audio_stretched_fast)
-        audio_stretched_slow = librosa.effects.time_stretch(audio, rate=0.9)
-        augmented.append(audio_stretched_slow)
-    except:
-        pass
+    # 1. 时间拉伸（更多变化）
+    for rate in [0.85, 0.9, 0.95, 1.05, 1.1, 1.15]:
+        try:
+            audio_stretched = librosa.effects.time_stretch(audio, rate=rate)
+            augmented.append(audio_stretched)
+        except:
+            pass
 
-    try:
-        audio_pitch_up = librosa.effects.pitch_shift(audio, sr=sr, n_steps=2)
-        augmented.append(audio_pitch_up)
-        audio_pitch_down = librosa.effects.pitch_shift(audio, sr=sr, n_steps=-2)
-        augmented.append(audio_pitch_down)
-    except:
-        pass
+    # 2. 音调偏移
+    for n_steps in [-3, -2, -1, 1, 2, 3]:
+        try:
+            audio_shifted = librosa.effects.pitch_shift(audio, sr=sr, n_steps=n_steps)
+            augmented.append(audio_shifted)
+        except:
+            pass
 
-    try:
-        noise = np.random.normal(0, 0.005, len(audio))
-        audio_noisy = audio + noise
-        augmented.append(audio_noisy)
-    except:
-        pass
+    # 3. 添加噪声（多个强度）
+    for noise_level in [0.003, 0.005, 0.008]:
+        try:
+            noise = np.random.normal(0, noise_level, len(audio))
+            audio_noisy = audio + noise
+            augmented.append(audio_noisy)
+        except:
+            pass
+
+    # 4. 音量变化
+    for gain in [0.8, 0.9, 1.1, 1.2]:
+        try:
+            audio_gain = audio * gain
+            augmented.append(audio_gain)
+        except:
+            pass
 
     return augmented
 
@@ -649,7 +659,7 @@ def main():
 
         # GMM
         if args.auto_tune and args.n_components is None:
-            best_n, best_cov = find_best_gmm_params(train_features_selected, val_features_selected, max_components=8)
+            best_n, best_cov = find_best_gmm_params(train_features_selected, val_features_selected, max_components=12)
         else:
             best_n = args.n_components if args.n_components else 3
             best_cov = 'full'
@@ -658,18 +668,29 @@ def main():
         gmm.fit(train_features_selected)
 
         # Isolation Forest
-        iso_forest = IsolationForest(n_estimators=100, contamination=0.1, random_state=42, n_jobs=-1)
+        iso_forest = IsolationForest(
+            n_estimators=200,           # 增加树的数量，提高稳定性
+            contamination=0.05,         # 降低到5%，减少误报
+            max_samples=256,            # 限制每棵树的样本数
+            random_state=42,
+            n_jobs=-1
+        )
         iso_forest.fit(train_features_selected)
 
         # One-Class SVM
-        ocsvm = OneClassSVM(kernel='rbf', gamma='auto', nu=0.1)
+        ocsvm = OneClassSVM(
+            kernel='rbf',
+            gamma='scale',              # 使用 scale 代替 auto，更稳定
+            nu=0.05,                    # 降低到5%，放宽边界
+            tol=1e-4                    # 提高容忍度
+        )
         ocsvm.fit(train_features_selected)
 
         models = {'gmm': gmm, 'iso_forest': iso_forest, 'ocsvm': ocsvm}
 
     else:
         if args.auto_tune and args.n_components is None:
-            best_n, best_cov = find_best_gmm_params(train_features_selected, val_features_selected, max_components=8)
+            best_n, best_cov = find_best_gmm_params(train_features_selected, val_features_selected, max_components=12)
         else:
             best_n = args.n_components if args.n_components else 3
             best_cov = 'full'
